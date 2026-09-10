@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.config import API_PREFIX
+from app.config import API_PREFIX, cors_origins, frontend_dir
 from app.errors import ApiError
 from app.routers import auth, expenses, groups, invites, payments, settlement
 
@@ -23,6 +25,9 @@ Money is always integer minor units. Mutations of existing records require an
 bearer session token from `POST /auth/magic-links/verify`.
 
 Storage is an in-process mock; state is lost on restart.
+
+The frontend in `frontend/` is served at `/`, so the browser talks to this API
+from the same origin.
 """
 
 # Status codes whose default FastAPI/Starlette body must be rewritten into the
@@ -45,6 +50,17 @@ def create_app() -> FastAPI:
         docs_url=f"{API_PREFIX}/docs",
         redoc_url=None,
     )
+
+    origins = cors_origins()
+    if origins:
+        # Only for a frontend served from another origin; same-origin needs none.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "Content-Type", "If-Match"],
+            expose_headers=["ETag"],
+        )
 
     for router in (
         auth.router,
@@ -89,6 +105,12 @@ def create_app() -> FastAPI:
             status_code=500,
             content={"code": "internal", "message": "Something went wrong."},
         )
+
+    # Mounted last so it can never shadow an API route. The app routes hash-only
+    # (`#/groups/...`), so serving `index.html` for `/` is the whole of it.
+    static = frontend_dir()
+    if static is not None:
+        app.mount("/", StaticFiles(directory=static, html=True), name="frontend")
 
     return app
 

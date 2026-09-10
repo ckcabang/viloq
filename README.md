@@ -7,12 +7,12 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | Path            | What it is                                                         |
 | --------------- | ------------------------------------------------------------------ |
 | `openapi.yaml`  | The API contract. Source of truth for both sides.                   |
-| `app/`          | FastAPI backend implementing that contract.                         |
-| `frontend/`     | Mocked frontend (in-browser `localStorage` backend in `js/api.js`). |
-| `tests/`        | Endpoint and domain tests.                                          |
+| `app/`          | FastAPI backend implementing that contract, and serving `frontend/`.|
+| `frontend/`     | The single-page app. All server calls live in `js/api.js`.          |
+| `tests/`        | Endpoint, domain, and frontend-wiring tests.                        |
 | `_docs/specs.md`| V1 product specification.                                           |
 
-## Backend
+## Run it
 
 ```sh
 uv sync                                   # install dependencies
@@ -20,13 +20,22 @@ uv run uvicorn app.main:app --reload      # serve on http://127.0.0.1:8000
 uv run pytest                             # run the suite
 ```
 
-Interactive docs are at `/api/v1/docs`; the generated schema at `/api/v1/openapi.json`.
+Open http://127.0.0.1:8000/ — the app and its API are one origin, so the browser
+calls `/api/v1/...` relatively and nothing needs configuring. Interactive docs
+are at `/api/v1/docs`; the generated schema at `/api/v1/openapi.json`.
+
+To host the page elsewhere instead, see [`frontend/README.md`](frontend/README.md);
+`VILOQ_CORS_ORIGINS` controls which origins may call the API cross-origin
+(defaulting to `localhost:5173` and `127.0.0.1:5173` for the static-server dev
+flow).
+
+## Backend
 
 ### How it is organised
 
 ```
 app/
-  main.py       FastAPI app, error handlers ({code, message} for every failure)
+  main.py       FastAPI app, error handlers ({code, message}), frontend mount
   config.py     environment-driven settings
   deps.py       session auth, membership checks, If-Match parsing
   db.py         the mock database (in-memory; state is lost on restart)
@@ -38,8 +47,8 @@ app/
 ```
 
 `app/domain/` is a port of `frontend/js/lib/` (`split.js`, `balances.js`,
-`settle.js`), so the server resolves splits and balances exactly as the mocked
-frontend does. Money is always integer minor units; the split allocation uses
+`settle.js`), so the allocation the form previews as you type is the one the
+server stores. Money is always integer minor units; the split allocation uses
 `Fraction` internally so it reconciles to the total exactly.
 
 ### Storage

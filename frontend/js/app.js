@@ -17,44 +17,28 @@ const SESSION_KEY = 'viloq.session.v1';
 // ---------------------------------------------------------------------------
 
 export const store = {
-  realSessionToken: null, // the signed-in user's token
-  sessionToken: null, // active token (may be a demo actor)
-  actingAs: null, // { label } when impersonating a demo actor
+  sessionToken: null, // bearer token for every API call
   user: null,
 
   get isAuthed() {
-    return Boolean(this.realSessionToken && this.user);
+    return Boolean(this.sessionToken && this.user);
   },
 
   loadSession() {
     try {
-      this.realSessionToken = localStorage.getItem(SESSION_KEY);
-      this.sessionToken = this.realSessionToken;
+      this.sessionToken = localStorage.getItem(SESSION_KEY);
     } catch {
-      this.realSessionToken = null;
       this.sessionToken = null;
     }
   },
 
   setSession(token) {
-    this.realSessionToken = token;
     this.sessionToken = token;
-    this.actingAs = null;
     try {
       if (token) localStorage.setItem(SESSION_KEY, token);
       else localStorage.removeItem(SESSION_KEY);
     } catch {
       /* ignore */
-    }
-  },
-
-  actAs(token, label) {
-    if (!token || token === this.realSessionToken) {
-      this.sessionToken = this.realSessionToken;
-      this.actingAs = null;
-    } else {
-      this.sessionToken = token;
-      this.actingAs = { label };
     }
   },
 };
@@ -179,16 +163,10 @@ function renderTopBar() {
        <a href="#/">Groups</a>
      </nav>
      <span class="topbar__spacer"></span>
-     ${
-       store.actingAs
-         ? `<span class="pill pill--warn" title="You are acting as a demo member">acting as ${esc(store.actingAs.label)}</span>`
-         : ''
-     }
      <div class="menu" data-menu>
        <button class="menu__trigger" data-menu-trigger>${esc(name)} ▾</button>
        <div class="menu__panel" hidden>
          <a href="#/account">Account &amp; display name</a>
-         <button data-action="reset-demo">Reset demo data</button>
          <button data-action="signout">Sign out</button>
        </div>
      </div>`,
@@ -206,18 +184,10 @@ function renderTopBar() {
     { once: true },
   );
   on(menu, 'click', '[data-action="signout"]', async () => {
-    await api.signOut(store.realSessionToken).catch(() => {});
+    await api.signOut(store.sessionToken).catch(() => {});
     store.setSession(null);
     store.user = null;
     toast('Signed out');
-    navigate('/login');
-  });
-  on(menu, 'click', '[data-action="reset-demo"]', async () => {
-    if (!confirm('Reset all mock data back to the demo group? This clears every group, expense and payment in this browser.')) return;
-    await api.resetDemoData();
-    store.setSession(null);
-    store.user = null;
-    toast('Demo data reset');
     navigate('/login');
   });
 }
@@ -241,16 +211,16 @@ async function boot() {
     `<header id="topbar" class="topbar"></header>
      <main id="view" class="view"></main>
      <footer class="appfoot">
-       <span>Mock backend — data lives in this browser only.</span>
+       <span>Data lives on the server.</span>
        <span class="dot">•</span>
        <span>All server calls run through <code>js/api.js</code></span>
      </footer>`,
   );
 
   store.loadSession();
-  if (store.realSessionToken) {
+  if (store.sessionToken) {
     try {
-      store.user = await api.getCurrentUser(store.realSessionToken);
+      store.user = await api.getCurrentUser(store.sessionToken);
       if (!store.user) store.setSession(null);
     } catch {
       store.setSession(null);
@@ -258,19 +228,17 @@ async function boot() {
   }
 
   window.addEventListener('hashchange', render);
-  // Cross-tab: another tab mutated the mock DB or auth state.
+  // Cross-tab: another tab signed in or out.
   window.addEventListener('storage', (e) => {
-    if (e.key === 'viloq.mock.db.v1') {
-      toast('Updated from another tab');
-      render();
-    }
-    if (e.key === SESSION_KEY) {
-      store.loadSession();
-      api.getCurrentUser(store.realSessionToken).then((u) => {
+    if (e.key !== SESSION_KEY) return;
+    store.loadSession();
+    api
+      .getCurrentUser(store.sessionToken)
+      .catch(() => null)
+      .then((u) => {
         store.user = u;
         render();
       });
-    }
   });
 
   render();

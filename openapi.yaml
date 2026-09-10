@@ -38,10 +38,11 @@ info:
     * Errors are `{ "code": string, "message": string }`. Clients branch on
       `code`; `message` is shown to the user verbatim.
 
-    * Mock-only helpers in `api.js` (`resetDemoData`, `getDemoActors`, the demo
-      "act as" tokens, the demo-group auto-join, and the `token` / `magicLinkPath`
-      fields returned by the magic-link request) are intentionally **not** part of
-      this contract.
+    * The mock's demo-only helpers (`resetDemoData`, `getDemoActors`, the "act as"
+      tokens, and the demo-group auto-join) are intentionally **not** part of this
+      contract; they were dropped from the client when it was wired to this API.
+      The `token` / `magicLinkPath` fields on the magic-link response are
+      non-production conveniences, present only while there is no mailer.
 
   license:
     name: UNLICENSED

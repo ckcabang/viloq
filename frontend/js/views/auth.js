@@ -43,10 +43,10 @@ function renderLogin(ctx, { heading = 'Sign in', intro = 'We email you a one-tim
            <button class="btn btn--primary" type="submit">Email me a link</button>
          </form>
          <div data-sent hidden class="notice notice--ok stack">
-           <strong>Magic link ready</strong>
-           <p class="muted small">In a real deployment this arrives by email and expires in
-             <span data-ttl></span> minutes. For this mock, use the link below.</p>
-           <a class="btn btn--primary" data-link href="#">Open my magic link</a>
+           <strong>Magic link sent</strong>
+           <p class="muted small">Check your email. The link expires in <span data-ttl></span> minutes.</p>
+           <p class="muted small" data-dev-note hidden>This server has no mailer, so the link is right here:</p>
+           <a class="btn btn--primary" data-link href="#" hidden>Open my magic link</a>
            <button class="btn btn--ghost" data-action="resend" type="button">Send another link</button>
          </div>
        </div>
@@ -64,11 +64,18 @@ function renderLogin(ctx, { heading = 'Sign in', intro = 'We email you a one-tim
     btn.disabled = true;
     try {
       const res = await api.requestMagicLink(new FormData(form).get('email'));
-      const linkHash = query.next
-        ? `${res.magicLinkPath}&next=${encodeURIComponent(query.next)}`
-        : res.magicLinkPath;
-      qs(sent, '[data-link]').setAttribute('href', linkHash);
       qs(sent, '[data-ttl]').textContent = res.expiresInMinutes;
+      // A server with a mailer emails the link and keeps the token to itself.
+      const link = qs(sent, '[data-link]');
+      const devNote = qs(sent, '[data-dev-note]');
+      if (res.magicLinkPath) {
+        link.setAttribute(
+          'href',
+          query.next ? `${res.magicLinkPath}&next=${encodeURIComponent(query.next)}` : res.magicLinkPath,
+        );
+      }
+      link.hidden = !res.magicLinkPath;
+      devNote.hidden = !res.magicLinkPath;
       form.hidden = true;
       sent.hidden = false;
       toast(`Link sent to ${res.email}`);

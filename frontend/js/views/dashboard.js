@@ -1,8 +1,8 @@
 // Group dashboard: balances, settlement suggestions, recent activity.
 
 import api, { ApiError } from '../api.js';
-import { store, navigate, render as rerender } from '../app.js';
-import { esc, setHTML, qs, qsa, on, toast, copyToClipboard, formatDate } from '../lib/dom.js';
+import { store, render as rerender } from '../app.js';
+import { esc, setHTML, on, toast, copyToClipboard, formatDate } from '../lib/dom.js';
 import { formatMoney } from '../lib/money.js';
 
 const SPLIT_LABELS = { equal: 'Equal', percentage: 'Percentage', share: 'Shares', exact: 'Exact' };
@@ -33,8 +33,6 @@ export async function render(ctx) {
            <a class="btn btn--ghost" href="#/groups/${esc(groupId)}/admin">Members &amp; settings</a>
          </div>
        </div>
-
-       ${demoBar(snap)}
 
        <div class="grid-2">
          <section class="card card--pad stack">
@@ -163,26 +161,10 @@ function paymentRow(p, nameOf, c, groupId) {
 }
 
 // ---------------------------------------------------------------------------
-// Demo "act as" bar
-// ---------------------------------------------------------------------------
-
-function demoBar(snap) {
-  return `<div class="demobar" data-demobar>
-     <span class="pill pill--demo">Demo</span>
-     <label>Act as
-       <select data-act-as>
-         <option value="">${esc(snap.me.displayName)} (you)</option>
-       </select>
-     </label>
-     <span class="muted small">Switch identity to record payments as another member or test permissions. Mock only.</span>
-   </div>`;
-}
-
-// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
-async function wire(root, snap, groupId) {
+function wire(root, snap, groupId) {
   // Settlement strategy toggle
   on(root, 'click', '[data-strategy]', (e, el) => {
     settlementStrategy = el.dataset.strategy;
@@ -217,26 +199,6 @@ async function wire(root, snap, groupId) {
       if (err instanceof ApiError && err.code === 'version_conflict') rerender();
     }
   });
-
-  // Demo act-as
-  const select = qs(root, '[data-act-as]');
-  if (select) {
-    const actors = await api.getDemoActors(store.realSessionToken, groupId);
-    for (const actor of actors.filter((a) => !a.isReal)) {
-      const opt = document.createElement('option');
-      opt.value = actor.sessionToken;
-      opt.textContent = actor.label;
-      select.appendChild(opt);
-    }
-    select.value = store.actingAs ? store.sessionToken : '';
-    on(select, 'change', 'select', () => {
-      const token = select.value;
-      const label = token ? select.options[select.selectedIndex].text : null;
-      store.actAs(token, label);
-      toast(token ? `Now acting as ${label}` : 'Back to your own identity');
-      rerender();
-    });
-  }
 }
 
 function openInviteModal(root, groupId, group) {
@@ -267,10 +229,14 @@ function openInviteModal(root, groupId, group) {
         </div>
       </label>
       <p class="muted small">Anyone with this code can join. Treat it like a password.</p>
-      <div class="row">
-        <button class="btn" data-action="regen">Regenerate</button>
-        <button class="btn btn--danger-ghost" data-action="revoke">Revoke</button>
-      </div>
+      ${
+        group.isCreator
+          ? `<div class="row">
+               <button class="btn" data-action="regen">Regenerate</button>
+               <button class="btn btn--danger-ghost" data-action="revoke">Revoke</button>
+             </div>`
+          : '<p class="muted small">Only the group creator can regenerate or revoke it.</p>'
+      }
     </div>`;
   document.body.appendChild(dlg);
 

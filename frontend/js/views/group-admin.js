@@ -57,10 +57,14 @@ export async function render(ctx) {
        <div class="card card--pad stack">
          <h2>Invite</h2>
          <p class="muted small">Current code: <code>${esc(g.inviteCode)}</code>${g.inviteRevoked ? ' <span class="tag tag--muted">revoked</span>' : ''}</p>
-         <div class="row">
-           <button class="btn" data-action="regen">Regenerate code</button>
-           <button class="btn btn--danger-ghost" data-action="revoke">Revoke</button>
-         </div>
+         ${
+           g.isCreator
+             ? `<div class="row">
+                  <button class="btn" data-action="regen">Regenerate code</button>
+                  <button class="btn btn--danger-ghost" data-action="revoke">Revoke</button>
+                </div>`
+             : '<p class="muted small">Only the group creator can regenerate or revoke the code.</p>'
+         }
        </div>
      </div>`,
   );

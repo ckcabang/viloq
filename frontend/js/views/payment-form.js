@@ -37,7 +37,7 @@ export async function render(ctx) {
        <div class="card card--pad stack">
          <h1>${editing ? 'Edit payment' : 'Record a payment'}</h1>
          <p class="muted small">Recording money <strong>${esc(payerName)}</strong> actually transferred.
-           ${editing ? '' : 'You can only record payments you made — switch identity in the demo bar to record as someone else.'}</p>
+           ${editing ? '' : 'You can only record payments you made; the other person records theirs.'}</p>
          <form data-form="payment" class="stack">
            <label>From
              <input value="${esc(payerName)}${editing ? '' : ' (you)'}" disabled />
