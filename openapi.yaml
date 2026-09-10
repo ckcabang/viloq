@@ -1,0 +1,1397 @@
+openapi: 3.1.0
+
+info:
+  title: viloq API
+  version: 0.1.0
+  summary: HTTP contract for the viloq expense-splitting app.
+  description: >
+    Reverse-engineered from `frontend/js/api.js` (the single "backend boundary"
+    module, currently an in-browser mock) and the screens that consume it. This is
+    the contract the real backend will be implemented against.
+
+
+    Design decisions baked in (previously open questions):
+
+
+    * **Money** is always an integer number of minor units (cents; JPY has none).
+      Never a float.
+
+    * **Optimistic concurrency.** `group`, `expense` and `payment` carry an integer
+      `version`. Every mutation of an existing record requires an `If-Match` header
+      whose value is the `version` the client last saw. A mismatch returns `409`
+      with `code: "version_conflict"` and the current server copy of the record.
+      Responses that return a single versioned record also send an `ETag` header
+      with the new version. Inside `GET /groups/{groupId}` the version travels in
+      each record's `version` field.
+
+    * **Auth** is an opaque bearer session token from
+      `POST /auth/magic-links/verify`, sent as `Authorization: Bearer <token>`.
+      Because a session can only be obtained by verifying a magic link, every
+      authenticated user has a verified email — there is no separate verification
+      gate on group create/join.
+
+    * **One shape per entity.** A given entity (`Group`, `Member`, `Expense`,
+      `Payment`) has exactly one response schema. Screen-specific computed fields
+      (`isCreator`, `isMe`, `canManage`, …) are additive supersets, never a
+      different shape.
+
+    * Errors are `{ "code": string, "message": string }`. Clients branch on
+      `code`; `message` is shown to the user verbatim.
+
+    * Mock-only helpers in `api.js` (`resetDemoData`, `getDemoActors`, the demo
+      "act as" tokens, the demo-group auto-join, and the `token` / `magicLinkPath`
+      fields returned by the magic-link request) are intentionally **not** part of
+      this contract.
+
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: /api/v1
+    description: Relative to the app origin. The path prefix is a placeholder, not fixed by the frontend.
+
+tags:
+  - name: Auth
+    description: Passwordless magic-link login and the current-user record.
+  - name: Groups
+    description: Group list, creation, the dashboard snapshot, and settings.
+  - name: Members
+    description: A user's per-group display name.
+  - name: Invites
+    description: Invite code lookup, joining, rotation, and revocation.
+  - name: Expenses
+    description: Create / edit / delete expenses with server-resolved split allocation.
+  - name: Payments
+    description: Record / edit / delete real money transfers between two members.
+  - name: Settlement
+    description: Suggested transfers (recommendations only — never creates payments).
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ==========================================================================
+  # Auth
+  # ==========================================================================
+  /auth/magic-links:
+    post:
+      tags: [Auth]
+      operationId: requestMagicLink
+      summary: Request a magic sign-in link
+      description: >
+        Emails a one-time, 15-minute sign-in link for the given address. Always
+        succeeds for a syntactically valid email, whether or not an account
+        exists, so the response never reveals account existence.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: Trimmed and lower-cased server-side.
+                  example: sam@example.com
+      responses:
+        "200":
+          description: Link sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MagicLinkRequestResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /auth/magic-links/verify:
+    post:
+      tags: [Auth]
+      operationId: verifyMagicLink
+      summary: Exchange a magic-link token for a session
+      description: >
+        Consumes the token (single-use, 15-minute expiry), creates the user on
+        first sign-in with an empty display name, and opens a session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  example: 3f9c1a2b4d6e8f00
+      responses:
+        "200":
+          description: Session established.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyResult"
+        "400":
+          description: >
+            Token missing, unknown, or already used (`code: invalid_token`), or
+            past its expiry (`code: expired_token`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                invalidToken:
+                  value: { code: invalid_token, message: "This link is not valid. Request a new one." }
+                expiredToken:
+                  value: { code: expired_token, message: "This link expired. Request a new one." }
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getCurrentUser
+      summary: Get the signed-in user
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    patch:
+      tags: [Auth]
+      operationId: updateDisplayName
+      summary: Update the account-level display name
+      description: >
+        Sets the user's global display name — the default suggested when joining
+        new groups. Does not change existing per-group member names.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName:
+                  type: string
+                  description: Trimmed server-side; must be non-empty after trim.
+                  example: Sam
+      responses:
+        "200":
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: signOut
+      summary: Invalidate the current session
+      description: >
+        Deletes the server-side session. Idempotent — returns `204` even if the
+        token was already invalid. Does not affect group memberships.
+      responses:
+        "204":
+          description: Signed out.
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  # ==========================================================================
+  # Groups
+  # ==========================================================================
+  /groups:
+    get:
+      tags: [Groups]
+      operationId: listGroups
+      summary: List the groups the current user belongs to
+      description: One summary row per membership, sorted by group name (case-insensitive).
+      responses:
+        "200":
+          description: Group summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GroupSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    post:
+      tags: [Groups]
+      operationId: createGroup
+      summary: Create a group
+      description: >
+        Creates the group and the caller's membership in one step. The caller's
+        per-group display name is required here. Currency must be one of the
+        supported codes and is fixed once the group has its first expense.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, currency, displayName]
+              properties:
+                name:
+                  type: string
+                  example: Lisbon Trip
+                currency:
+                  $ref: "#/components/schemas/CurrencyCode"
+                displayName:
+                  type: string
+                  description: The creator's display name within this group.
+                  example: Alice
+      responses:
+        "201":
+          description: The created group.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /groups/{groupId}:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    get:
+      tags: [Groups]
+      operationId: getGroupSnapshot
+      summary: Get the full group dashboard snapshot
+      description: >
+        One call returns everything the group screens need: the group, the
+        caller's membership, all members, all expenses, all payments, and derived
+        balances. Requires the caller to be a member.
+      responses:
+        "200":
+          description: Group snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GroupSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    patch:
+      tags: [Groups]
+      operationId: updateGroup
+      summary: Update group name and/or currency
+      description: >
+        Creator-only. Partial update — send only the fields to change. Currency
+        becomes immutable once the group has any expense (`code: currency_locked`).
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name:
+                  type: string
+                  example: Lisbon Trip 2026
+                currency:
+                  $ref: "#/components/schemas/CurrencyCode"
+      responses:
+        "200":
+          description: The updated group (version incremented).
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Group"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller is not a member, or is a member but not the group creator (`code: forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            Stale version (`code: version_conflict`, body includes the current
+            record) or a currency change blocked by existing expenses
+            (`code: currency_locked`).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/VersionConflictError"
+                  - $ref: "#/components/schemas/Error"
+              examples:
+                versionConflict:
+                  value:
+                    code: version_conflict
+                    message: "This record was changed by someone else. Reloading the latest version."
+                    current: { id: grp_1, name: "Lisbon Trip", currency: EUR, version: 4 }
+                currencyLocked:
+                  value: { code: currency_locked, message: "Currency is locked once the group has expenses." }
+        "412":
+          $ref: "#/components/responses/MissingIfMatch"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /groups/{groupId}/me:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    patch:
+      tags: [Members]
+      operationId: updateMyMemberName
+      summary: Update the caller's display name within this group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName:
+                  type: string
+                  description: Trimmed server-side; must be non-empty after trim.
+                  example: Al
+      responses:
+        "200":
+          description: The updated member record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Member"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  # ==========================================================================
+  # Invites
+  # ==========================================================================
+  /invites/{code}:
+    parameters:
+      - $ref: "#/components/parameters/InviteCode"
+    get:
+      tags: [Invites]
+      operationId: getInviteInfo
+      summary: Look up a group from an invite code
+      description: >
+        Unauthenticated — the join screen uses it to show the group name before
+        sign-in. Returns a `revoked` flag rather than an error for a revoked code
+        so the client can present it.
+      security: []
+      responses:
+        "200":
+          description: Invite target info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteInfo"
+        "404":
+          description: "No group has this invite code (`code: not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /invites/{code}/join:
+    parameters:
+      - $ref: "#/components/parameters/InviteCode"
+    post:
+      tags: [Invites]
+      operationId: joinGroup
+      summary: Join a group via invite code
+      description: >
+        Associates the authenticated user with the group. Idempotent — if the
+        caller is already a member, the existing membership is returned unchanged
+        and `displayName` is ignored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName:
+                  type: string
+                  description: The caller's display name in this group. Required; trimmed, must be non-empty.
+                  example: Dana
+      responses:
+        "200":
+          description: Joined, or already a member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JoinResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "The invite has been revoked (`code: invite_revoked`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "Invite code is not valid (`code: not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /groups/{groupId}/invite:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    post:
+      tags: [Invites]
+      operationId: regenerateInvite
+      summary: Rotate the group's invite code
+      description: >
+        Creator-only. Issues a fresh code and token and clears the revoked flag;
+        the previous code stops working immediately.
+      responses:
+        "200":
+          description: The new invite code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InviteRotationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotCreator"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    delete:
+      tags: [Invites]
+      operationId: revokeInvite
+      summary: Revoke the group's current invite code
+      description: >
+        Creator-only. Marks the current code unusable until it is regenerated.
+      responses:
+        "204":
+          description: Revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotCreator"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  # ==========================================================================
+  # Expenses
+  # ==========================================================================
+  /groups/{groupId}/expenses:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    post:
+      tags: [Expenses]
+      operationId: createExpense
+      summary: Add an expense
+      description: >
+        The server resolves the split (`splitType` + `participants`) into an exact
+        `shares` allocation with deterministic largest-remainder rounding, and
+        rejects (`code: validation`) anything that does not reconcile to
+        `amountMinor`. `participants` entries whose `memberId` is not a current
+        member are dropped before validation. Any member may add an expense.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExpenseInput"
+      responses:
+        "201":
+          description: The created expense with its resolved shares.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Expense"
+        "400":
+          description: "Validation failed (`code: validation`) — see `message` for the reason."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                doesNotReconcile:
+                  value: { code: validation, message: "Split does not reconcile to the total." }
+                noParticipants:
+                  value: { code: validation, message: "Select at least one participant." }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /groups/{groupId}/expenses/{expenseId}:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+      - $ref: "#/components/parameters/ExpenseId"
+    put:
+      tags: [Expenses]
+      operationId: updateExpense
+      summary: Replace an expense
+      description: >
+        Full replacement — send the complete expense payload, same shape as
+        create. Any member may edit any expense.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExpenseInput"
+      responses:
+        "200":
+          description: The updated expense (version incremented).
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Expense"
+        "400":
+          description: "Validation failed (`code: validation`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          description: "Group or expense not found, or the expense belongs to another group (`code: not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+        "412":
+          $ref: "#/components/responses/MissingIfMatch"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    delete:
+      tags: [Expenses]
+      operationId: deleteExpense
+      summary: Delete an expense
+      description: Any member may delete any expense. Balances update immediately.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          description: "Group or expense not found (`code: not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+        "412":
+          $ref: "#/components/responses/MissingIfMatch"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  # ==========================================================================
+  # Payments
+  # ==========================================================================
+  /groups/{groupId}/payments:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Record a payment
+      description: >
+        Records money the caller actually transferred. **The payer is always the
+        caller's own membership** and is not accepted in the body. The recipient
+        must be a different member of the same group.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentInput"
+      responses:
+        "201":
+          description: The created payment.
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          description: "Validation failed (`code: validation`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              examples:
+                sameMember:
+                  value: { code: validation, message: "Payer and recipient must differ." }
+                badRecipient:
+                  value: { code: validation, message: "Pick a recipient." }
+                nonPositive:
+                  value: { code: validation, message: "Amount must be greater than zero." }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /groups/{groupId}/payments/{paymentId}:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+      - $ref: "#/components/parameters/PaymentId"
+    put:
+      tags: [Payments]
+      operationId: updatePayment
+      summary: Replace a payment
+      description: >
+        Only the user who recorded the payment may edit it. The payer cannot be
+        changed.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentInput"
+      responses:
+        "200":
+          description: The updated payment (version incremented).
+          headers:
+            ETag:
+              $ref: "#/components/headers/ETag"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "400":
+          description: "Validation failed (`code: validation`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: >
+            Caller is not a member, or did not record this payment
+            (`code: forbidden`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "Group or payment not found (`code: not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+        "412":
+          $ref: "#/components/responses/MissingIfMatch"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    delete:
+      tags: [Payments]
+      operationId: deletePayment
+      summary: Delete a payment
+      description: Only the user who recorded the payment may delete it.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: "Caller is not a member, or did not record this payment (`code: forbidden`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: "Group or payment not found (`code: not_found`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/VersionConflict"
+        "412":
+          $ref: "#/components/responses/MissingIfMatch"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  # ==========================================================================
+  # Settlement
+  # ==========================================================================
+  /groups/{groupId}/settlement:
+    parameters:
+      - $ref: "#/components/parameters/GroupId"
+    get:
+      tags: [Settlement]
+      operationId: getSettlement
+      summary: Get suggested settlement transfers
+      description: >
+        Recommendations only — this never creates payment records. `minimized`
+        greedily matches the largest creditor to the largest debtor (at most N-1
+        transfers). `relationship` keeps the real debtor→creditor pairs from
+        actual expenses, netting mutual debt and applying recorded payments.
+      parameters:
+        - name: strategy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [minimized, relationship]
+            default: minimized
+          description: An unrecognized value is rejected with `400`.
+      responses:
+        "200":
+          description: Suggested transfers for the requested strategy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettlementResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/NotAMember"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Opaque session token from `POST /auth/magic-links/verify`.
+
+  headers:
+    ETag:
+      description: >
+        The record's new `version`, quoted. Send it back as `If-Match` on the next
+        mutation of this record.
+      schema:
+        type: string
+      example: '"2"'
+
+  parameters:
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      schema: { type: string }
+      example: grp_9f2c1a4b5d6e7f80
+    ExpenseId:
+      name: expenseId
+      in: path
+      required: true
+      schema: { type: string }
+      example: exp_1a2b3c4d5e6f7080
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string }
+      example: pay_1a2b3c4d5e6f7080
+    InviteCode:
+      name: code
+      in: path
+      required: true
+      schema: { type: string }
+      description: Human-typable invite code, format `XXX-XXX-XXX`.
+      example: ABC-DEF-GHJ
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema:
+        type: string
+      description: >
+        The `version` the client last saw for the target record (the value from
+        its `version` field or a prior `ETag`), quoted per RFC 7232, e.g.
+        `If-Match: "3"`. A mismatch yields `409 version_conflict`; omitting it
+        yields `412`.
+      example: '"3"'
+
+  responses:
+    BadRequest:
+      description: "Request validation failed (`code: validation`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: validation, message: "Enter a valid email address." }
+    Unauthorized:
+      description: >
+        Missing or invalid session (`code: unauthorized`). The frontend clears its
+        stored session and routes to sign-in.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: unauthorized, message: "Please sign in again." }
+    NotFound:
+      description: "Target resource does not exist (`code: not_found`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: not_found, message: "Group not found." }
+    NotAMember:
+      description: "Authenticated but not a member of this group (`code: forbidden`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: forbidden, message: "You are not a member of this group." }
+    NotCreator:
+      description: "Caller is a member but not the group creator (`code: forbidden`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: forbidden, message: "Only the group creator can do that." }
+    VersionConflict:
+      description: >
+        The record changed since the client last read it (`code: version_conflict`).
+        The body carries the current server copy so the client can reload.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/VersionConflictError"
+          example:
+            code: version_conflict
+            message: "This record was changed by someone else. Reloading the latest version."
+            current:
+              id: exp_1a2b3c4d5e6f7080
+              version: 5
+    MissingIfMatch:
+      description: The `If-Match` header is required for this mutation and was not supplied.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: precondition_required, message: "Provide the record version via If-Match." }
+    ServerError:
+      description: "Unexpected server error (`code: internal`)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { code: internal, message: "Something went wrong." }
+
+  schemas:
+
+    # ---- Primitives -----------------------------------------------------
+    CurrencyCode:
+      type: string
+      description: ISO-4217 code. The frontend currency picker offers exactly this set.
+      enum: [USD, EUR, GBP, CAD, AUD, INR, JPY]
+      example: EUR
+
+    MinorUnits:
+      type: integer
+      description: An amount in integer minor units of the group currency (e.g. cents; JPY has none).
+      example: 8730
+
+    SplitType:
+      type: string
+      enum: [equal, percentage, share, exact]
+
+    # ---- Errors -------------------------------------------------------
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: >
+            Stable machine-readable tag. Values in use: `validation`,
+            `unauthorized`, `forbidden`, `not_found`, `version_conflict`,
+            `currency_locked`, `invalid_token`, `expired_token`, `invite_revoked`,
+            `precondition_required`, `internal`.
+          example: validation
+        message:
+          type: string
+          description: Human-readable text shown directly to the user.
+          example: "Amount must be greater than zero."
+
+    VersionConflictError:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          required: [current]
+          properties:
+            code:
+              const: version_conflict
+            current:
+              description: The current server state of the record the client tried to modify.
+              type: object
+              additionalProperties: true
+
+    # ---- Auth --------------------------------------------------------
+    User:
+      type: object
+      required: [id, email, displayName, emailVerified, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          example: usr_1a2b3c4d5e6f7080
+        email:
+          type: string
+          format: email
+          description: Private — never exposed to other group members.
+          example: sam@example.com
+        displayName:
+          type: string
+          description: Empty string for a brand-new user until they pick one.
+          example: Sam
+        emailVerified:
+          type: boolean
+          description: Always `true` — a session can only exist after magic-link verification.
+          example: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    MagicLinkRequestResult:
+      type: object
+      required: [email, expiresInMinutes]
+      properties:
+        email:
+          type: string
+          format: email
+          description: The normalized (trimmed, lower-cased) email the link was issued for.
+        expiresInMinutes:
+          type: integer
+          example: 15
+        token:
+          type: string
+          description: >
+            Non-production builds only. Present so a local/mock UI can render the
+            link directly; a real backend emails the link and omits this.
+        magicLinkPath:
+          type: string
+          description: >
+            Non-production builds only. Client-side route that consumes the token,
+            e.g. `#/auth/verify?token=...`.
+
+    VerifyResult:
+      type: object
+      required: [sessionToken, user, needsDisplayName]
+      properties:
+        sessionToken:
+          type: string
+          description: Opaque bearer token for subsequent requests.
+        user:
+          $ref: "#/components/schemas/User"
+        needsDisplayName:
+          type: boolean
+          description: >
+            True when the user has no display name yet (first sign-in). The client
+            routes to a name-setup screen.
+
+    # ---- Groups ----------------------------------------------------
+    GroupSummary:
+      type: object
+      description: One row of `GET /groups`.
+      required:
+        [id, name, currency, memberCount, expenseCount, myMemberId, myDisplayName, myNetMinor]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        currency: { $ref: "#/components/schemas/CurrencyCode" }
+        memberCount: { type: integer }
+        expenseCount: { type: integer }
+        myMemberId:
+          type: string
+          description: The caller's member id in this group.
+        myDisplayName:
+          type: string
+          description: The caller's display name in this group.
+        myNetMinor:
+          allOf: [{ $ref: "#/components/schemas/MinorUnits" }]
+          description: The caller's net balance. Positive = owed to them, negative = they owe.
+
+    Group:
+      type: object
+      description: >
+        The canonical group record, returned by create, update, and (inside
+        `JoinResult`) join. `GroupView` in the snapshot is this plus computed
+        fields.
+      required:
+        [id, name, currency, createdByUserId, inviteCode, inviteRevoked, createdAt, updatedAt, version]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        currency: { $ref: "#/components/schemas/CurrencyCode" }
+        createdByUserId: { type: string }
+        inviteCode:
+          type: string
+          example: ABC-DEF-GHJ
+        inviteRevoked: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version:
+          type: integer
+          description: Optimistic-concurrency counter, incremented on every mutation.
+          example: 1
+
+    GroupView:
+      description: The group object embedded in `GroupSnapshot` — `Group` plus caller-relative computed fields.
+      allOf:
+        - $ref: "#/components/schemas/Group"
+        - type: object
+          required: [isCreator, currencyLocked, invitePath]
+          properties:
+            isCreator:
+              type: boolean
+              description: Whether the caller created this group (gates settings and invite management).
+            currencyLocked:
+              type: boolean
+              description: True once the group has any expense; currency can no longer change.
+            invitePath:
+              type: string
+              description: Client-side join route, e.g. `#/join?code=ABC-DEF-GHJ`.
+
+    Member:
+      type: object
+      description: The canonical member record, returned by `PATCH /groups/{groupId}/me` and inside `JoinResult`.
+      required: [id, groupId, userId, displayName, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        groupId: { type: string }
+        userId: { type: string }
+        displayName: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    MemberView:
+      description: A member as listed in `GroupSnapshot.members` (sorted by display name) — `Member` plus `isMe`.
+      allOf:
+        - $ref: "#/components/schemas/Member"
+        - type: object
+          required: [isMe]
+          properties:
+            isMe:
+              type: boolean
+              description: True for the calling user's own membership.
+
+    GroupSnapshot:
+      type: object
+      description: Everything the group screens need in one response.
+      required: [group, me, members, expenses, payments, balances]
+      properties:
+        group: { $ref: "#/components/schemas/GroupView" }
+        me:
+          type: object
+          description: The caller's own membership, as an id triple for convenience.
+          required: [memberId, displayName, userId]
+          properties:
+            memberId: { type: string }
+            displayName: { type: string }
+            userId: { type: string }
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/MemberView" }
+        expenses:
+          type: array
+          description: Newest first (by `date`, then `createdAt`).
+          items: { $ref: "#/components/schemas/Expense" }
+        payments:
+          type: array
+          description: Newest first.
+          items: { $ref: "#/components/schemas/Payment" }
+        balances:
+          type: array
+          items: { $ref: "#/components/schemas/Balance" }
+
+    # ---- Invites -------------------------------------------------
+    InviteInfo:
+      type: object
+      required: [groupId, groupName, currency, revoked, memberCount]
+      properties:
+        groupId: { type: string }
+        groupName: { type: string }
+        currency: { $ref: "#/components/schemas/CurrencyCode" }
+        revoked: { type: boolean }
+        memberCount: { type: integer }
+
+    JoinResult:
+      type: object
+      required: [group, member]
+      properties:
+        group: { $ref: "#/components/schemas/Group" }
+        member: { $ref: "#/components/schemas/Member" }
+
+    InviteRotationResult:
+      type: object
+      required: [inviteCode, invitePath]
+      properties:
+        inviteCode:
+          type: string
+          example: KLM-NPQ-RST
+        invitePath:
+          type: string
+          example: "#/join?code=KLM-NPQ-RST"
+
+    # ---- Expenses ---------------------------------------------
+    SplitInput:
+      type: object
+      description: >
+        One participant's split input. The meaning of `raw` depends on the
+        expense `splitType`.
+      required: [memberId]
+      properties:
+        memberId: { type: string }
+        raw:
+          type: number
+          description: >
+            Omitted (and ignored) for `equal`. Required and finite for the other
+            types: `percentage` — a percent 0–100 (all must total 100);
+            `share` — a positive relative weight; `exact` — an integer amount in
+            minor units (all must total the expense). A missing or non-finite
+            value where one is required yields `400 code: validation`.
+          example: 2
+
+    ExpenseShare:
+      type: object
+      description: A server-resolved allocation line. The `amountMinor` values always sum to the expense total.
+      required: [memberId, amountMinor]
+      properties:
+        memberId: { type: string }
+        amountMinor: { $ref: "#/components/schemas/MinorUnits" }
+
+    ExpenseInput:
+      type: object
+      required: [description, date, amountMinor, payerMemberId, splitType, participants]
+      properties:
+        description:
+          type: string
+          description: Required, non-empty after trim.
+          example: Groceries
+        note:
+          type: string
+          description: Optional free text. Defaults to an empty string.
+          default: ""
+        date:
+          type: string
+          format: date
+          example: "2026-09-02"
+        amountMinor:
+          allOf: [{ $ref: "#/components/schemas/MinorUnits" }]
+          description: Must be greater than zero.
+          example: 8730
+        payerMemberId:
+          type: string
+          description: Must be a member of this group.
+        splitType: { $ref: "#/components/schemas/SplitType" }
+        participants:
+          type: array
+          minItems: 1
+          description: >
+            Any subset of group members. Entries whose `memberId` is not a current
+            member are dropped before validation; at least one must remain.
+          items: { $ref: "#/components/schemas/SplitInput" }
+
+    Expense:
+      type: object
+      required:
+        [id, groupId, description, note, amountMinor, date, payerMemberId, splitType, splitInputs, shares, createdByUserId, createdAt, updatedAt, version]
+      properties:
+        id: { type: string }
+        groupId: { type: string }
+        description: { type: string }
+        note:
+          type: string
+          description: Empty string when none.
+        amountMinor: { $ref: "#/components/schemas/MinorUnits" }
+        date: { type: string, format: date }
+        payerMemberId: { type: string }
+        splitType: { $ref: "#/components/schemas/SplitType" }
+        splitInputs:
+          type: array
+          description: The (member-filtered) original split inputs, kept so the edit form can rebuild the UI.
+          items: { $ref: "#/components/schemas/SplitInput" }
+        shares:
+          type: array
+          description: The resolved allocation. Sums to `amountMinor`.
+          items: { $ref: "#/components/schemas/ExpenseShare" }
+        createdByUserId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version: { type: integer }
+
+    # ---- Payments -------------------------------------------
+    PaymentInput:
+      type: object
+      required: [recipientMemberId, amountMinor, date]
+      properties:
+        recipientMemberId:
+          type: string
+          description: A member of this group, different from the payer (the caller).
+        amountMinor:
+          allOf: [{ $ref: "#/components/schemas/MinorUnits" }]
+          description: Must be greater than zero.
+        date:
+          type: string
+          format: date
+        note:
+          type: string
+          description: Optional. Defaults to an empty string.
+          default: ""
+
+    Payment:
+      type: object
+      required:
+        [id, groupId, payerMemberId, recipientMemberId, amountMinor, date, note, createdByUserId, createdAt, updatedAt, version, canManage]
+      properties:
+        id: { type: string }
+        groupId: { type: string }
+        payerMemberId:
+          type: string
+          description: Always the recording user's membership.
+        recipientMemberId: { type: string }
+        amountMinor: { $ref: "#/components/schemas/MinorUnits" }
+        date: { type: string, format: date }
+        note:
+          type: string
+          description: Empty string when none.
+        createdByUserId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        version: { type: integer }
+        canManage:
+          type: boolean
+          description: >
+            Whether the caller may edit or delete this payment (true iff they
+            recorded it). Always present on any payment returned to a client.
+
+    # ---- Balances & settlement ---------------------------
+    Balance:
+      type: object
+      required: [memberId, netMinor]
+      properties:
+        memberId: { type: string }
+        netMinor:
+          allOf: [{ $ref: "#/components/schemas/MinorUnits" }]
+          description: >
+            Net balance. Positive = the member is owed money, negative = the
+            member owes, zero = settled. Derived from transactions, never stored.
+
+    Transfer:
+      type: object
+      required: [fromMemberId, toMemberId, amountMinor]
+      properties:
+        fromMemberId:
+          type: string
+          description: The debtor (pays).
+        toMemberId:
+          type: string
+          description: The creditor (receives).
+        amountMinor:
+          allOf: [{ $ref: "#/components/schemas/MinorUnits" }]
+          description: Always positive.
+
+    SettlementResult:
+      type: object
+      required: [strategy, transfers]
+      properties:
+        strategy:
+          type: string
+          enum: [minimized, relationship]
+          description: Echo of the strategy actually applied.
+          example: minimized
+        transfers:
+          type: array
+          description: Empty when everyone is settled.
+          items: { $ref: "#/components/schemas/Transfer" }
