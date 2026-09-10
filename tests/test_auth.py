@@ -49,6 +49,24 @@ class TestRequestMagicLink:
         assert response.status_code == 400
         assert response.json()["code"] == "validation"
 
+    def test_mock_backend_echoes_the_token_and_client_route(self, client):
+        body = client.post(
+            f"{API}/auth/magic-links", json={"email": "echo@example.com"}
+        ).json()
+        assert body["token"]
+        assert body["magicLinkPath"] == f"#/auth/verify?token={body['token']}"
+
+    def test_a_real_deployment_can_withhold_the_token(
+        self, client, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("VILOQ_EXPOSE_MAGIC_LINK", "0")
+        body = client.post(
+            f"{API}/auth/magic-links", json={"email": "quiet@example.com"}
+        ).json()
+        assert body["token"] is None
+        assert body["magicLinkPath"] is None
+        assert body["expiresInMinutes"] == 15
+
 
 class TestVerifyMagicLink:
     def test_first_sign_in_creates_the_user_and_asks_for_a_name(self, client):

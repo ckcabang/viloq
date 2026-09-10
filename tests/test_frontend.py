@@ -94,6 +94,21 @@ class TestCors:
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == origin
 
+    def test_the_etag_header_is_exposed_to_a_cross_origin_caller(
+        self, alice, group
+    ):
+        # The frontend reads ETag off mutation responses to send it back as
+        # If-Match; a cross-origin browser only sees it if it is exposed.
+        origin = cors_origins()[0]
+        response = alice.patch(
+            f"/groups/{group.id}",
+            json={"name": "Renamed"},
+            headers={**alice.if_match(group.version), "Origin": origin},
+        )
+        assert response.status_code == 200
+        exposed = response.headers["access-control-expose-headers"].lower()
+        assert "etag" in exposed
+
     def test_an_unknown_origin_is_not_allowed(self, client):
         response = client.get(
             f"{API}/groups", headers={"Origin": "https://evil.example"}

@@ -29,6 +29,15 @@ class TestInviteInfo:
         }
         assert body["memberCount"] == 3
 
+    def test_member_count_tracks_joins(self, client, bob: Actor, group: GroupCtx):
+        assert (
+            client.get(f"{API}/invites/{group.invite_code}").json()["memberCount"] == 1
+        )
+        bob.post(f"/invites/{group.invite_code}/join", json={"displayName": "Bob"})
+        assert (
+            client.get(f"{API}/invites/{group.invite_code}").json()["memberCount"] == 2
+        )
+
     def test_reports_revocation_rather_than_erroring(
         self, client, alice: Actor, group: GroupCtx
     ):

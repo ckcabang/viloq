@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -24,6 +25,17 @@ from app.db import Database, get_db, in_memory_database  # noqa: E402
 from app.main import app as fastapi_app  # noqa: E402
 
 API = "/api/v1"
+
+
+def as_datetime(iso: str) -> datetime:
+    """Parse an ISO-8601 timestamp from a wire body for chronological comparison.
+
+    Comparing the raw strings is wrong at the fractional-seconds boundary: a
+    timestamp whose microseconds are exactly zero serializes without a fraction
+    (`...T12:00:00Z`), and `Z` sorts after `.`, so a strictly later `updatedAt`
+    can compare as less than `createdAt`.
+    """
+    return datetime.fromisoformat(iso)
 
 
 @pytest.fixture
