@@ -8,6 +8,12 @@
   </head>
   <body>
     <div id="app"></div>
+    <script>
+      // Where the backend lives. Same origin by default, which is what uvicorn
+      // serves. Hosting this page separately (e.g. `python -m http.server 5173`)?
+      // Point it at the API: 'http://127.0.0.1:8000/api/v1'.
+      window.VILOQ_API_BASE = '/api/v1';
+    </script>
     <script type="module" src="./js/app.js"></script>
     <noscript>viloq needs JavaScript enabled.</noscript>
   </body>

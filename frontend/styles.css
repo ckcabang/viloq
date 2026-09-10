@@ -357,25 +357,8 @@ select:disabled {
   text-decoration: none;
 }
 
-/* ---- Pills / tags ---- */
+/* ---- Tags ---- */
 
-.pill {
-  display: inline-block;
-  padding: 0.15rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 700;
-  background: var(--surface-2);
-  color: var(--muted);
-}
-.pill--warn {
-  background: color-mix(in srgb, var(--warn) 20%, transparent);
-  color: var(--warn);
-}
-.pill--demo {
-  background: color-mix(in srgb, var(--primary) 18%, transparent);
-  color: var(--primary);
-}
 .tag {
   display: inline-block;
   font-size: 0.7rem;
@@ -391,30 +374,6 @@ select:disabled {
 .tag--muted {
   background: var(--surface-2);
   color: var(--muted);
-}
-
-/* ---- Demo bar ---- */
-
-.demobar {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  padding: 0.6rem 0.9rem;
-  border: 1px dashed var(--border);
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-.demobar label {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.85rem;
-}
-.demobar select {
-  width: auto;
-  margin-top: 0;
-  padding: 0.35rem 0.5rem;
 }
 
 /* ---- Group list ---- */
