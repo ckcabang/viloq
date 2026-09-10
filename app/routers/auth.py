@@ -55,7 +55,7 @@ def request_magic_link(body: MagicLinkRequest, db: DbDep) -> MagicLinkRequestRes
     responses={400: {"model": Error}},
 )
 def verify_magic_link(body: VerifyRequest, db: DbDep) -> VerifyResult:
-    with db.lock:
+    with db.transaction():
         link = db.magic_link(body.token or "")
         if link is None:
             raise errors.ApiError(
@@ -93,12 +93,15 @@ def get_current_user(user: UserDep) -> User:
     summary="Update the account-level display name",
     responses={400: {"model": Error}},
 )
-def update_display_name(body: DisplayNameRequest, user: UserDep) -> User:
+def update_display_name(body: DisplayNameRequest, db: DbDep, user: UserDep) -> User:
     name = (body.displayName or "").strip()
     if not name:
         raise errors.validation("Display name cannot be empty.")
-    user.display_name = name
-    user.updated_at = now()
+
+    with db.transaction():
+        user.display_name = name
+        user.updated_at = now()
+
     return views.user(user)
 
 

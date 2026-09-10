@@ -90,7 +90,7 @@ def create_expense(
     user: UserDep,
     response: Response,
 ) -> Expense:
-    with db.lock:
+    with db.transaction():
         require_group_membership(db, user, groupId)
         resolved = _resolve(db, groupId, body)
         stamp = now()
@@ -131,7 +131,7 @@ def update_expense(
     user: UserDep,
     response: Response,
 ) -> Expense:
-    with db.lock:
+    with db.transaction():
         require_group_membership(db, user, groupId)
         expense = _require_expense(db, groupId, expenseId)
         check_version(
@@ -166,7 +166,7 @@ def delete_expense(
     db: DbDep,
     user: UserDep,
 ) -> Response:
-    with db.lock:
+    with db.transaction():
         require_group_membership(db, user, groupId)
         expense = _require_expense(db, groupId, expenseId)
         check_version(

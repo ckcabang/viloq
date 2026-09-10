@@ -54,7 +54,7 @@ def join_group(
     if not name:
         raise errors.validation("Display name cannot be empty.")
 
-    with db.lock:
+    with db.transaction():
         group = db.group_by_invite_code(code)
         if group is None:
             raise errors.not_found("This invite code is not valid.")
@@ -89,7 +89,7 @@ def join_group(
 def regenerate_invite(
     groupId: GroupIdDep, db: DbDep, user: UserDep
 ) -> InviteRotationResult:
-    with db.lock:
+    with db.transaction():
         group, _ = require_group_membership(db, user, groupId)
         require_creator(group, user)
         group.invite_code = db.unique_invite_code()
@@ -109,7 +109,7 @@ def regenerate_invite(
     responses={403: {"model": Error}, 404: {"model": Error}},
 )
 def revoke_invite(groupId: GroupIdDep, db: DbDep, user: UserDep) -> Response:
-    with db.lock:
+    with db.transaction():
         group, _ = require_group_membership(db, user, groupId)
         require_creator(group, user)
         group.invite_revoked = True

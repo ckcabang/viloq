@@ -14,6 +14,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # flow); serving it from here needs no CORS at all. Set to "" to allow none.
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 
+# A SQLAlchemy URL, so the backend is chosen by configuration rather than by
+# code: `postgresql+psycopg://user:pw@host/viloq` needs no change here beyond
+# installing the driver. Relative SQLite paths are relative to the working
+# directory, so the default lands beside wherever the server was started.
+DEFAULT_DATABASE_URL = "sqlite+pysqlite:///./viloq.db"
+
+
+def database_url() -> str:
+    """Where to store data. Any SQLAlchemy-supported database will do."""
+    return os.environ.get("VILOQ_DATABASE_URL", "").strip() or DEFAULT_DATABASE_URL
+
 
 def expose_magic_link_token() -> bool:
     """Whether magic-link responses echo the token and client route.

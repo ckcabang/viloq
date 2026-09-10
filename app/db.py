@@ -1,21 +1,35 @@
-"""Mock database.
+"""Persistence: the engine, and the repository the routers talk to.
 
-An in-memory store behind a small repository surface. Everything the routers do
-goes through `Database`, so replacing this with a real database later means
-reimplementing this one class (and making the methods async) without touching
-the routers.
+Everything the routers do goes through `Database`, so the rest of the app never
+sees a session, a query, or a dialect. Which database that is comes from
+`VILOQ_DATABASE_URL` (see `app.config.database_url`) — SQLite by default, and
+nothing here is written against it. The only dialect-aware code is
+`_sqlite_options` / `_configure_sqlite`, deliberately fenced off so that adding
+Postgres later means installing a driver and setting the URL.
 
-Not safe for multi-process deployment — a single process holds all state, and it
-is lost on restart. That is intentional for now.
+Concurrency: one `Database`, holding one session, per request. Read-modify-write
+sequences are wrapped in `transaction()`, which on SQLite takes the write lock
+up front (see `_configure_sqlite`), so two requests editing the same record
+cannot interleave. A write outside such a block commits on its own.
 """
 
 from __future__ import annotations
 
 import secrets
-import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import Engine, create_engine, event, select
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.sql import Select
+
+from app.config import database_url
 from app.models import (
+    Base,
     Expense,
     Group,
     MagicLink,
@@ -48,52 +62,189 @@ def invite_code() -> str:
     return f"{raw[0:3]}-{raw[3:6]}-{raw[6:9]}"
 
 
-class Database:
-    """In-memory tables plus the queries the routers need."""
+# ---- Engine --------------------------------------------------------------
 
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self.users: dict[str, User] = {}
-        self.sessions: dict[str, Session] = {}
-        self.magic_links: dict[str, MagicLink] = {}
-        self.groups: dict[str, Group] = {}
-        self.members: dict[str, Member] = {}
-        self.expenses: dict[str, Expense] = {}
-        self.payments: dict[str, Payment] = {}
+
+def _sqlite_options(url) -> dict:
+    """Connection settings SQLite needs and other backends do not."""
+    options: dict = {
+        # Sync endpoints run in a threadpool, so connections cross threads; and
+        # a writer should wait for the lock rather than fail instantly.
+        "connect_args": {"check_same_thread": False, "timeout": 30},
+    }
+    if url.database in (None, "", ":memory:"):
+        # Every connection to an in-memory database gets its own empty one.
+        # Pinning a single connection is what makes such a URL behave.
+        options["poolclass"] = StaticPool
+    return options
+
+
+def _configure_sqlite(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _on_connect(dbapi_connection, _record) -> None:
+        # Hand transaction control to SQLAlchemy, so `_on_begin` below is the
+        # only thing that opens one.
+        dbapi_connection.isolation_level = None
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
+
+    @event.listens_for(engine, "begin")
+    def _on_begin(connection) -> None:
+        # A plain SQLite BEGIN defers the write lock until the first write, so
+        # a read-modify-write can read a row that another transaction is about
+        # to change, then fail at commit. IMMEDIATE takes the lock at the start
+        # instead — the atomicity `transaction()` advertises. Other backends
+        # give the same guarantee through MVCC.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def create_db_engine(url: str | None = None) -> Engine:
+    """An engine for `url` (default: the configured one), tuned per dialect."""
+    parsed = make_url(url or database_url())
+    options: dict = {"pool_pre_ping": True}
+    if parsed.get_backend_name() == "sqlite":
+        options |= _sqlite_options(parsed)
+
+    engine = create_engine(parsed, **options)
+    if engine.dialect.name == "sqlite":
+        _configure_sqlite(engine)
+    return engine
+
+
+def new_session_factory(bound: Engine) -> sessionmaker[SASession]:
+    """Sessions whose loaded values stay readable after commit.
+
+    Endpoints build their response from records they already hold, sometimes
+    after the transaction has closed; expiring on commit would send them back
+    to the database for values that cannot have changed.
+    """
+    return sessionmaker(bind=bound, expire_on_commit=False)
+
+
+_engine: Engine | None = None
+_sessions: sessionmaker[SASession] | None = None
+
+
+def engine() -> Engine:
+    """The process-wide engine, built on first use."""
+    global _engine, _sessions
+    if _engine is None:
+        _engine = create_db_engine()
+        _sessions = new_session_factory(_engine)
+    return _engine
+
+
+def init_db() -> None:
+    """Create any missing tables.
+
+    Enough while the schema only ever grows; one that changes shape will want
+    migrations instead.
+    """
+    Base.metadata.create_all(engine())
+
+
+def get_db() -> Iterator[Database]:
+    """FastAPI dependency: one session, and one `Database`, per request."""
+    engine()  # builds `_sessions` on the first request
+    assert _sessions is not None
+    with _sessions() as session:
+        yield Database(session)
+
+
+@contextmanager
+def in_memory_database() -> Iterator[Database]:
+    """A private, throwaway SQLite database. For tests and scratch work."""
+    scratch = create_db_engine("sqlite+pysqlite://")
+    Base.metadata.create_all(scratch)
+    try:
+        with new_session_factory(scratch)() as session:
+            yield Database(session)
+    finally:
+        scratch.dispose()
+
+
+# ---- Repository ----------------------------------------------------------
+
+
+class Database:
+    """The queries and mutations the routers need, over one session."""
+
+    def __init__(self, session: SASession) -> None:
+        self._session = session
+        self._depth = 0
 
     @property
-    def lock(self) -> threading.RLock:
-        """Held across read-modify-write sequences so mutations stay atomic."""
-        return self._lock
+    def session(self) -> SASession:
+        """The session itself, for anything this surface does not cover."""
+        return self._session
 
-    def reset(self) -> None:
-        with self._lock:
-            self.users.clear()
-            self.sessions.clear()
-            self.magic_links.clear()
-            self.groups.clear()
-            self.members.clear()
-            self.expenses.clear()
-            self.payments.clear()
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Run a read-modify-write as one atomic unit.
+
+        Commits on the way out, rolls back if the body raises — including the
+        `ApiError`s routers raise mid-sequence, so a rejected request leaves
+        nothing behind. Nesting is allowed; only the outermost block commits.
+
+        Records edited in place inside the block are saved with it, so an edit
+        belongs in one whether or not it also adds anything.
+        """
+        self._depth += 1
+        try:
+            yield
+        except BaseException:
+            if self._depth == 1:
+                self._session.rollback()
+            raise
+        else:
+            if self._depth == 1:
+                self._session.commit()
+        finally:
+            self._depth -= 1
+
+    def _save(self, *records: object) -> None:
+        """Persist new records. Edits to existing ones ride on the commit."""
+        self._session.add_all(records)
+        self._settle()
+
+    def _settle(self) -> None:
+        # Inside a `transaction()` the outermost block commits; a lone write
+        # commits itself, so callers never have to think about which they are.
+        if self._depth:
+            self._session.flush()
+        else:
+            self._session.commit()
+
+    def _delete(self, record: object | None) -> None:
+        if record is not None:
+            self._session.delete(record)
+            self._settle()
+
+    def _first(self, statement: Select):
+        return self._session.execute(statement).scalars().first()
+
+    def _all(self, statement: Select) -> list:
+        return list(self._session.execute(statement).scalars())
 
     # ---- Auth ------------------------------------------------------------
 
     def create_magic_link(self, email: str) -> MagicLink:
-        token = high_entropy_token(18)
         link = MagicLink(
-            token=token,
+            token=high_entropy_token(18),
             email=email,
             expires_at=now() + timedelta(minutes=MAGIC_LINK_TTL_MINUTES),
+            used=False,
         )
-        with self._lock:
-            self.magic_links[token] = link
+        self._save(link)
         return link
 
     def magic_link(self, token: str) -> MagicLink | None:
-        return self.magic_links.get(token)
+        return self._session.get(MagicLink, token)
 
     def user_by_email(self, email: str) -> User | None:
-        return next((u for u in self.users.values() if u.email == email), None)
+        return self._first(select(User).where(User.email == email))
 
     def create_user(self, email: str, display_name: str = "") -> User:
         stamp = now()
@@ -105,33 +256,29 @@ class Database:
             created_at=stamp,
             updated_at=stamp,
         )
-        with self._lock:
-            self.users[user.id] = user
+        self._save(user)
         return user
 
     def create_session(self, user_id: str) -> Session:
         session = Session(
             token=high_entropy_token(20), user_id=user_id, created_at=now()
         )
-        with self._lock:
-            self.sessions[session.token] = session
+        self._save(session)
         return session
 
     def user_for_session(self, token: str | None) -> User | None:
         if not token:
             return None
-        session = self.sessions.get(token)
-        return self.users.get(session.user_id) if session else None
+        record = self._session.get(Session, token)
+        return self._session.get(User, record.user_id) if record else None
 
     def delete_session(self, token: str | None) -> None:
-        if token:
-            with self._lock:
-                self.sessions.pop(token, None)
+        self._delete(self._session.get(Session, token) if token else None)
 
     # ---- Groups and members ---------------------------------------------
 
     def group(self, group_id: str) -> Group | None:
-        return self.groups.get(group_id)
+        return self._session.get(Group, group_id)
 
     def unique_invite_code(self) -> str:
         """A fresh code no live group is already using."""
@@ -141,72 +288,69 @@ class Database:
                 return code
 
     def group_by_invite_code(self, code: str) -> Group | None:
-        return next(
-            (g for g in self.groups.values() if g.invite_code == code), None
-        )
+        return self._first(select(Group).where(Group.invite_code == code))
 
     def members_of(self, group_id: str) -> list[Member]:
-        return [m for m in self.members.values() if m.group_id == group_id]
+        return self._all(
+            select(Member)
+            .where(Member.group_id == group_id)
+            .order_by(Member.created_at, Member.id)
+        )
 
     def membership(self, user_id: str, group_id: str) -> Member | None:
-        return next(
-            (
-                m
-                for m in self.members.values()
-                if m.group_id == group_id and m.user_id == user_id
-            ),
-            None,
+        return self._first(
+            select(Member).where(
+                Member.group_id == group_id, Member.user_id == user_id
+            )
         )
 
     def memberships_of_user(self, user_id: str) -> list[Member]:
-        return [m for m in self.members.values() if m.user_id == user_id]
+        return self._all(
+            select(Member)
+            .where(Member.user_id == user_id)
+            .order_by(Member.created_at, Member.id)
+        )
 
     def add_group(self, group: Group) -> Group:
-        with self._lock:
-            self.groups[group.id] = group
+        self._save(group)
         return group
 
     def add_member(self, member: Member) -> Member:
-        with self._lock:
-            self.members[member.id] = member
+        self._save(member)
         return member
 
     # ---- Transactions ----------------------------------------------------
 
     def expenses_of(self, group_id: str) -> list[Expense]:
-        return [e for e in self.expenses.values() if e.group_id == group_id]
+        return self._all(
+            select(Expense)
+            .where(Expense.group_id == group_id)
+            .order_by(Expense.created_at, Expense.id)
+        )
 
     def payments_of(self, group_id: str) -> list[Payment]:
-        return [p for p in self.payments.values() if p.group_id == group_id]
+        return self._all(
+            select(Payment)
+            .where(Payment.group_id == group_id)
+            .order_by(Payment.created_at, Payment.id)
+        )
 
     def expense(self, expense_id: str) -> Expense | None:
-        return self.expenses.get(expense_id)
+        return self._session.get(Expense, expense_id)
 
     def payment(self, payment_id: str) -> Payment | None:
-        return self.payments.get(payment_id)
+        return self._session.get(Payment, payment_id)
 
     def add_expense(self, expense: Expense) -> Expense:
-        with self._lock:
-            self.expenses[expense.id] = expense
+        self._save(expense)
         return expense
 
     def delete_expense(self, expense_id: str) -> None:
-        with self._lock:
-            self.expenses.pop(expense_id, None)
+        self._delete(self.expense(expense_id))
 
     def add_payment(self, payment: Payment) -> Payment:
-        with self._lock:
-            self.payments[payment.id] = payment
+        self._save(payment)
         return payment
 
     def delete_payment(self, payment_id: str) -> None:
-        with self._lock:
-            self.payments.pop(payment_id, None)
-
-
-db = Database()
-
-
-def get_db() -> Database:
-    """FastAPI dependency; overridable in tests."""
-    return db
+        self._delete(self.payment(payment_id))

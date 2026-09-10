@@ -5,6 +5,9 @@ Run it with: `uv run uvicorn app.main:app --reload`
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import API_PREFIX, cors_origins, frontend_dir
+from app.db import init_db
 from app.errors import ApiError
 from app.routers import auth, expenses, groups, invites, payments, settlement
 
@@ -24,11 +28,20 @@ Money is always integer minor units. Mutations of existing records require an
 `If-Match` header carrying the version the client last saw. Auth is an opaque
 bearer session token from `POST /auth/magic-links/verify`.
 
-Storage is an in-process mock; state is lost on restart.
+Storage is a SQL database chosen by `VILOQ_DATABASE_URL`; it defaults to a
+SQLite file next to the working directory.
 
 The frontend in `frontend/` is served at `/`, so the browser talks to this API
 from the same origin.
 """
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    # Create any missing tables before the first request can ask for one.
+    init_db()
+    yield
+
 
 # Status codes whose default FastAPI/Starlette body must be rewritten into the
 # contract's `{code, message}` shape.
@@ -49,6 +62,7 @@ def create_app() -> FastAPI:
         openapi_url=f"{API_PREFIX}/openapi.json",
         docs_url=f"{API_PREFIX}/docs",
         redoc_url=None,
+        lifespan=lifespan,
     )
 
     origins = cors_origins()
