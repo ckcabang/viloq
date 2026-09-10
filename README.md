@@ -9,7 +9,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `openapi.yaml`  | The API contract. Source of truth for both sides.                   |
 | `app/`          | FastAPI backend implementing that contract, and serving `frontend/`.|
 | `frontend/`     | The single-page app. All server calls live in `js/api.js`.          |
-| `tests/`        | Endpoint, domain, and frontend-wiring tests.                        |
+| `tests/`        | Endpoint, domain, persistence, concurrency, and contract/wiring tests.|
 | `_docs/specs.md`| V1 product specification.                                           |
 
 ## Run it
@@ -39,7 +39,8 @@ flow).
 
 ```
 app/
-  main.py       FastAPI app, error handlers ({code, message}), frontend mount
+  main.py       FastAPI app, exception handlers, frontend mount
+  errors.py     the one error shape ({code, message}) and its constructors
   config.py     environment-driven settings
   deps.py       session auth, membership checks, If-Match parsing
   db.py         engine setup and the repository the routers use
