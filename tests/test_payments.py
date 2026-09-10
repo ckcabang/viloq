@@ -173,6 +173,7 @@ class TestUpdatePayment:
         assert body["note"] == "corrected"
         assert body["version"] == 2
         assert response.headers["ETag"] == '"2"'
+        assert body["updatedAt"] > body["createdAt"]
 
     def test_the_payer_never_changes(self, alice: Actor, bob: Actor, trio: GroupCtx):
         created = pay(alice, trio, bob).json()

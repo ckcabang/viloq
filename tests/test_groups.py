@@ -231,6 +231,16 @@ class TestUpdateGroup:
         assert response.json()["version"] == group.version + 1
         assert response.headers["ETag"] == f'"{group.version + 1}"'
 
+    def test_edit_moves_updated_at_past_created_at(
+        self, alice: Actor, group: GroupCtx
+    ):
+        body = alice.patch(
+            f"/groups/{group.id}",
+            json={"name": "Later"},
+            headers=alice.if_match(group.version),
+        ).json()
+        assert body["updatedAt"] > body["createdAt"]
+
     def test_changes_currency_while_the_group_has_no_expenses(
         self, alice: Actor, group: GroupCtx
     ):
@@ -321,6 +331,24 @@ class TestUpdateGroup:
             headers={"If-Match": '"not-a-number"'},
         )
         assert response.status_code == 412
+
+    def test_accepts_a_weak_if_match(self, alice: Actor, group: GroupCtx):
+        response = alice.patch(
+            f"/groups/{group.id}",
+            json={"name": "Weak"},
+            headers={"If-Match": f'W/"{group.version}"'},
+        )
+        assert response.status_code == 200
+        assert response.json()["version"] == group.version + 1
+
+    def test_rejects_an_unknown_currency(self, alice: Actor, group: GroupCtx):
+        response = alice.patch(
+            f"/groups/{group.id}",
+            json={"currency": "XBT"},
+            headers=alice.if_match(group.version),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "validation"
 
     def test_empty_patch_is_rejected(self, alice: Actor, group: GroupCtx):
         response = alice.patch(
