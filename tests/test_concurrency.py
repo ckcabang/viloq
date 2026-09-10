@@ -10,7 +10,8 @@ session factory rather than the shared in-memory fixture.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +23,13 @@ from tests.conftest import Actor, sign_in
 
 
 @pytest.fixture
-def racing_client(tmp_path) -> Iterator[TestClient]:
+def racing_clients(tmp_path) -> Iterator[Callable[[], TestClient]]:
+    """A factory for TestClients that all share one file-backed database.
+
+    Each racing branch needs its own client: `httpx.Client` (which `TestClient`
+    wraps) is not safe to call concurrently from multiple threads, so sharing
+    one would risk transport-state errors unrelated to the DB race under test.
+    """
     engine = create_db_engine(f"sqlite+pysqlite:///{tmp_path / 'race.db'}")
     Base.metadata.create_all(engine)
     sessions = new_session_factory(engine)
@@ -32,22 +39,38 @@ def racing_client(tmp_path) -> Iterator[TestClient]:
             yield Database(session)
 
     fastapi_app.dependency_overrides[get_db] = override
+    stack = ExitStack()
+
+    def make_client() -> TestClient:
+        return stack.enter_context(TestClient(fastapi_app))
+
     try:
-        with TestClient(fastapi_app) as client:
-            yield client
+        yield make_client
     finally:
+        stack.close()
         fastapi_app.dependency_overrides.clear()
         engine.dispose()
 
 
 def run_together(*targets) -> None:
-    """Start every callable at once and wait for all of them."""
+    """Start every callable at once and wait for all of them.
+
+    An exception raised in a worker thread is captured and re-raised here, so a
+    failing racing request surfaces as itself rather than as a downstream
+    KeyError when the test reads a result the thread never recorded.
+    """
     ready = threading.Barrier(len(targets))
+    errors: list[BaseException] = []
+    lock = threading.Lock()
 
     def wrapped(fn):
         def go() -> None:
             ready.wait()
-            fn()
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                with lock:
+                    errors.append(exc)
 
         return go
 
@@ -56,11 +79,13 @@ def run_together(*targets) -> None:
         thread.start()
     for thread in threads:
         thread.join()
+    if errors:
+        raise errors[0]
 
 
 class TestRacingEdits:
-    def test_one_patch_wins_and_the_other_gets_a_conflict(self, racing_client):
-        alice = sign_in(racing_client, "alice@example.com")
+    def test_one_patch_wins_and_the_other_gets_a_conflict(self, racing_clients):
+        alice = sign_in(racing_clients(), "alice@example.com")
         group = alice.post(
             "/groups", json={"name": "Race", "currency": "USD", "displayName": "Alice"}
         ).json()
@@ -68,11 +93,14 @@ class TestRacingEdits:
         results: dict[str, int] = {}
 
         def edit(tag: str, name: str):
+            # A separate client per branch: two threads must not share one.
+            editor = sign_in(racing_clients(), "alice@example.com")
+
             def go() -> None:
-                response = alice.patch(
+                response = editor.patch(
                     f"/groups/{group['id']}",
                     json={"name": name},
-                    headers=alice.if_match(1),
+                    headers=editor.if_match(1),
                 )
                 results[tag] = response.status_code
 
@@ -86,8 +114,8 @@ class TestRacingEdits:
         assert final["version"] == 2
         assert final["name"] in {"A", "B"}
 
-    def test_a_delete_and_an_edit_do_not_both_apply(self, racing_client):
-        alice = sign_in(racing_client, "alice@example.com")
+    def test_a_delete_and_an_edit_do_not_both_apply(self, racing_clients):
+        alice = sign_in(racing_clients(), "alice@example.com")
         group = alice.post(
             "/groups", json={"name": "Race", "currency": "USD", "displayName": "Alice"}
         ).json()
@@ -105,15 +133,18 @@ class TestRacingEdits:
         ).json()
 
         results: dict[str, int] = {}
+        # A separate client per branch: two threads must not share one.
+        deleter = sign_in(racing_clients(), "alice@example.com")
+        editor = sign_in(racing_clients(), "alice@example.com")
 
         def delete() -> None:
-            results["delete"] = alice.delete(
+            results["delete"] = deleter.delete(
                 f"/groups/{group['id']}/expenses/{expense['id']}",
-                headers=alice.if_match(1),
+                headers=deleter.if_match(1),
             ).status_code
 
         def edit() -> None:
-            results["edit"] = alice.put(
+            results["edit"] = editor.put(
                 f"/groups/{group['id']}/expenses/{expense['id']}",
                 json={
                     "description": "Brunch",
@@ -123,7 +154,7 @@ class TestRacingEdits:
                     "splitType": "equal",
                     "participants": [{"memberId": me}],
                 },
-                headers=alice.if_match(1),
+                headers=editor.if_match(1),
             ).status_code
 
         run_together(delete, edit)

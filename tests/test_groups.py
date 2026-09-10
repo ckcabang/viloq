@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, Actor, GroupCtx, join, make_group
+from tests.conftest import API, Actor, GroupCtx, as_datetime, join, make_group
 
 
 def add_expense(actor: Actor, group: GroupCtx, **overrides) -> dict:
@@ -239,7 +239,7 @@ class TestUpdateGroup:
             json={"name": "Later"},
             headers=alice.if_match(group.version),
         ).json()
-        assert body["updatedAt"] > body["createdAt"]
+        assert as_datetime(body["updatedAt"]) > as_datetime(body["createdAt"])
 
     def test_changes_currency_while_the_group_has_no_expenses(
         self, alice: Actor, group: GroupCtx

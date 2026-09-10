@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, Actor, GroupCtx
+from tests.conftest import API, Actor, GroupCtx, as_datetime
 
 
 def pay(actor: Actor, group: GroupCtx, recipient: Actor, **overrides):
@@ -173,7 +173,7 @@ class TestUpdatePayment:
         assert body["note"] == "corrected"
         assert body["version"] == 2
         assert response.headers["ETag"] == '"2"'
-        assert body["updatedAt"] > body["createdAt"]
+        assert as_datetime(body["updatedAt"]) > as_datetime(body["createdAt"])
 
     def test_the_payer_never_changes(self, alice: Actor, bob: Actor, trio: GroupCtx):
         created = pay(alice, trio, bob).json()

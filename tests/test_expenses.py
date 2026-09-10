@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import API, Actor, GroupCtx
+from tests.conftest import API, Actor, GroupCtx, as_datetime
 
 
 def payload(group: GroupCtx, payer: Actor, **overrides) -> dict:
@@ -401,7 +401,7 @@ class TestUpdateExpense:
         assert body["version"] == 2
         assert response.headers["ETag"] == '"2"'
         assert sorted(share_map(body).values()) == [2000, 2000, 2000]
-        assert body["updatedAt"] > body["createdAt"]
+        assert as_datetime(body["updatedAt"]) > as_datetime(body["createdAt"])
 
     def test_any_member_may_edit_any_expense(
         self, alice: Actor, bob: Actor, trio: GroupCtx
