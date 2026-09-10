@@ -87,7 +87,7 @@ def create_group(
         raise errors.validation("Your display name for this group is required.")
 
     stamp = now()
-    with db.lock:
+    with db.transaction():
         group = db.add_group(
             GroupRecord(
                 id=random_id("grp"),
@@ -178,7 +178,7 @@ def update_group(
     user: UserDep,
     response: Response,
 ) -> Group:
-    with db.lock:
+    with db.transaction():
         group, _ = require_group_membership(db, user, groupId)
         require_creator(group, user)
         check_version(
@@ -218,10 +218,13 @@ def update_my_member_name(
     db: DbDep,
     user: UserDep,
 ) -> Member:
-    _, me = require_group_membership(db, user, groupId)
     name = (body.displayName or "").strip()
     if not name:
         raise errors.validation("Display name cannot be empty.")
-    me.display_name = name
-    me.updated_at = now()
+
+    with db.transaction():
+        _, me = require_group_membership(db, user, groupId)
+        me.display_name = name
+        me.updated_at = now()
+
     return views.member(me)

@@ -14,8 +14,8 @@ uv run uvicorn app.main:app --reload   # from the repo root
 # then open http://127.0.0.1:8000/
 ```
 
-State lives on the server. The backend's store is in-memory, so restarting it
-starts over.
+State lives on the server, in a SQLite database by default, and survives a
+restart. Delete `viloq.db` to start over.
 
 ### Serving the frontend separately
 

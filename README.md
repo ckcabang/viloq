@@ -24,6 +24,10 @@ Open http://127.0.0.1:8000/ — the app and its API are one origin, so the brows
 calls `/api/v1/...` relatively and nothing needs configuring. Interactive docs
 are at `/api/v1/docs`; the generated schema at `/api/v1/openapi.json`.
 
+Data goes into `viloq.db` beside where you started the server, and survives a
+restart; delete the file to start over, or set `VILOQ_DATABASE_URL` to put it
+elsewhere (see [Storage](#storage)).
+
 To host the page elsewhere instead, see [`frontend/README.md`](frontend/README.md);
 `VILOQ_CORS_ORIGINS` controls which origins may call the API cross-origin
 (defaulting to `localhost:5173` and `127.0.0.1:5173` for the static-server dev
@@ -38,8 +42,8 @@ app/
   main.py       FastAPI app, error handlers ({code, message}), frontend mount
   config.py     environment-driven settings
   deps.py       session auth, membership checks, If-Match parsing
-  db.py         the mock database (in-memory; state is lost on restart)
-  models.py     internal storage records
+  db.py         engine setup and the repository the routers use
+  models.py     storage records, mapped to tables
   schemas.py    wire schemas, one per schema in openapi.yaml
   views.py      storage record -> wire shape
   domain/       pure logic: split allocation, balances, settlement
@@ -53,10 +57,28 @@ server stores. Money is always integer minor units; the split allocation uses
 
 ### Storage
 
-`app/db.py` is a deliberate placeholder: a single in-process `Database` object
-holding plain dicts. Everything goes through it, so swapping in a real database
-means reimplementing that one class without touching the routers. It is not safe
-across multiple processes and does not persist.
+A SQL database, reached through SQLAlchemy. `VILOQ_DATABASE_URL` chooses which
+one; it defaults to `sqlite+pysqlite:///./viloq.db`, a file beside wherever the
+server was started. Missing tables are created at startup — enough while the
+schema only grows; one that changes shape will want migrations.
+
+Nothing above `app/db.py` knows the dialect. The routers see only `Database`, a
+repository of named queries over one session, and the columns in
+`app/models.py` are the portable SQLAlchemy types. Pointing this at Postgres is
+meant to be a driver install and a URL:
+
+```sh
+uv add psycopg
+VILOQ_DATABASE_URL='postgresql+psycopg://user:pw@localhost/viloq' uv run uvicorn app.main:app
+```
+
+The two places that do care about the backend are `_sqlite_options` and
+`_configure_sqlite` in `app/db.py`, which are skipped for any other dialect.
+
+`Database.transaction()` groups a read-modify-write into one atomic unit,
+committing on the way out and rolling back if the body raises — so a request
+rejected halfway (a `409`, say) leaves nothing behind. A write outside such a
+block commits on its own. Each request gets its own session.
 
 ### Conventions the contract fixes
 

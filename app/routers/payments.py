@@ -59,7 +59,7 @@ def create_payment(
     user: UserDep,
     response: Response,
 ) -> Payment:
-    with db.lock:
+    with db.transaction():
         # The payer is always the caller's own membership; it is never taken
         # from the request body.
         _, me = require_group_membership(db, user, groupId)
@@ -106,7 +106,7 @@ def update_payment(
     user: UserDep,
     response: Response,
 ) -> Payment:
-    with db.lock:
+    with db.transaction():
         require_group_membership(db, user, groupId)
         payment = _require_payment(db, groupId, paymentId)
         if payment.created_by_user_id != user.id:
@@ -151,7 +151,7 @@ def delete_payment(
     db: DbDep,
     user: UserDep,
 ) -> Response:
-    with db.lock:
+    with db.transaction():
         require_group_membership(db, user, groupId)
         payment = _require_payment(db, groupId, paymentId)
         if payment.created_by_user_id != user.id:

@@ -1,27 +1,35 @@
 """Shared fixtures.
 
-Every test gets a clean mock database and a small `Actor` helper that wraps the
+Every test gets a clean database and a small `Actor` helper that wraps the
 TestClient with a session token, so tests read as "alice does X" rather than as
 header plumbing.
 """
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import Database, get_db
-from app.main import app as fastapi_app
+# The app defaults to a SQLite file in the working directory, and its startup
+# hook creates that schema whether or not the tests override `get_db`. Point it
+# somewhere disposable before importing it, so a test run never writes a file.
+os.environ.setdefault("VILOQ_DATABASE_URL", "sqlite+pysqlite://")
+
+from app.db import Database, get_db, in_memory_database  # noqa: E402
+from app.main import app as fastapi_app  # noqa: E402
 
 API = "/api/v1"
 
 
 @pytest.fixture
-def db() -> Database:
-    return Database()
+def db() -> Iterator[Database]:
+    with in_memory_database() as database:
+        yield database
 
 
 @pytest.fixture
