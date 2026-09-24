@@ -7,7 +7,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | Path            | What it is                                                         |
 | --------------- | ------------------------------------------------------------------ |
 | `openapi.yaml`  | The API contract. Source of truth for both sides.                   |
-| `app/`          | FastAPI backend implementing that contract, and serving `frontend/`.|
+| `backend/`      | FastAPI backend implementing that contract, and serving `frontend/`.|
 | `frontend/`     | The single-page app. All server calls live in `js/api.js`.          |
 | `tests/`        | Endpoint, domain, persistence, concurrency, and contract/wiring tests.|
 | `_docs/specs.md`| V1 product specification.                                           |
@@ -16,7 +16,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 
 ```sh
 uv sync                                   # install dependencies
-uv run uvicorn app.main:app --reload      # serve on http://127.0.0.1:8000
+uv run uvicorn backend.main:app --reload  # serve on http://127.0.0.1:8000
 uv run pytest                             # run the suite
 ```
 
@@ -38,7 +38,7 @@ flow).
 ### How it is organised
 
 ```
-app/
+backend/
   main.py       FastAPI app, exception handlers, frontend mount
   errors.py     the one error shape ({code, message}) and its constructors
   config.py     environment-driven settings
@@ -51,7 +51,7 @@ app/
   routers/      one module per tag in openapi.yaml
 ```
 
-`app/domain/` is a port of `frontend/js/lib/` (`split.js`, `balances.js`,
+`backend/domain/` is a port of `frontend/js/lib/` (`split.js`, `balances.js`,
 `settle.js`), so the allocation the form previews as you type is the one the
 server stores. Money is always integer minor units; the split allocation uses
 `Fraction` internally so it reconciles to the total exactly.
@@ -63,18 +63,18 @@ one; it defaults to `sqlite+pysqlite:///./viloq.db`, a file beside wherever the
 server was started. Missing tables are created at startup — enough while the
 schema only grows; one that changes shape will want migrations.
 
-Nothing above `app/db.py` knows the dialect. The routers see only `Database`, a
+Nothing above `backend/db.py` knows the dialect. The routers see only `Database`, a
 repository of named queries over one session, and the columns in
-`app/models.py` are the portable SQLAlchemy types. Pointing this at Postgres is
+`backend/models.py` are the portable SQLAlchemy types. Pointing this at Postgres is
 meant to be a driver install and a URL:
 
 ```sh
 uv add psycopg
-VILOQ_DATABASE_URL='postgresql+psycopg://user:pw@localhost/viloq' uv run uvicorn app.main:app
+VILOQ_DATABASE_URL='postgresql+psycopg://user:pw@localhost/viloq' uv run uvicorn backend.main:app
 ```
 
 The two places that do care about the backend are `_sqlite_options` and
-`_configure_sqlite` in `app/db.py`, which are skipped for any other dialect.
+`_configure_sqlite` in `backend/db.py`, which are skipped for any other dialect.
 
 `Database.transaction()` groups a read-modify-write into one atomic unit,
 committing on the way out and rolling back if the body raises — so a request

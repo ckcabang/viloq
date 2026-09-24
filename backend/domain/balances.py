@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from app.models import Expense, Member, Payment
+from backend.models import Expense, Member, Payment
 
 
 def compute_balances(

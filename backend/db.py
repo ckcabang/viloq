@@ -2,7 +2,7 @@
 
 Everything the routers do goes through `Database`, so the rest of the app never
 sees a session, a query, or a dialect. Which database that is comes from
-`VILOQ_DATABASE_URL` (see `app.config.database_url`) — SQLite by default, and
+`VILOQ_DATABASE_URL` (see `backend.config.database_url`) — SQLite by default, and
 nothing here is written against it. The only dialect-aware code is
 `_sqlite_options` / `_configure_sqlite`, deliberately fenced off so that adding
 Postgres later means installing a driver and setting the URL.
@@ -27,8 +27,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql import Select
 
-from app.config import database_url
-from app.models import (
+from backend.config import database_url
+from backend.models import (
     Base,
     Expense,
     Group,

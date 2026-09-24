@@ -6,11 +6,11 @@ import re
 
 from fastapi import APIRouter, Response, status
 
-from app import errors, views
-from app.config import expose_magic_link_token
-from app.db import MAGIC_LINK_TTL_MINUTES, now
-from app.deps import DbDep, TokenDep, UserDep
-from app.schemas import (
+from backend import errors, views
+from backend.config import expose_magic_link_token
+from backend.db import MAGIC_LINK_TTL_MINUTES, now
+from backend.deps import DbDep, TokenDep, UserDep
+from backend.schemas import (
     DisplayNameRequest,
     Error,
     MagicLinkRequest,

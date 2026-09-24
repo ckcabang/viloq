@@ -10,10 +10,10 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from app.domain.balances import compute_balances
-from app.domain.settle import minimized_transfers, relationship_preserving_transfers
-from app.domain.split import compute_allocation
-from app.models import Expense, ExpenseShare, Member, Payment
+from backend.domain.balances import compute_balances
+from backend.domain.settle import minimized_transfers, relationship_preserving_transfers
+from backend.domain.split import compute_allocation
+from backend.models import Expense, ExpenseShare, Member, Payment
 
 STAMP = datetime(2026, 9, 2, tzinfo=UTC)
 

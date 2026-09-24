@@ -1,7 +1,7 @@
 """Persisted records, mapped to tables.
 
 These are the shapes the database holds. They are deliberately separate from
-the wire schemas in `app/schemas.py`: changing storage should not touch the
+the wire schemas in `backend/schemas.py`: changing storage should not touch the
 HTTP contract, and vice versa.
 
 Nothing here is dialect-specific. Column types are the portable SQLAlchemy

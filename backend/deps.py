@@ -7,9 +7,9 @@ from typing import Annotated
 
 from fastapi import Depends, Header, Path
 
-from app import errors
-from app.db import Database, get_db
-from app.models import Group, Member, User
+from backend import errors
+from backend.db import Database, get_db
+from backend.models import Group, Member, User
 
 DbDep = Annotated[Database, Depends(get_db)]
 

@@ -1,4 +1,4 @@
-"""`app/config.py` — the environment reads that pick the backend at deploy time.
+"""`backend/config.py` — the environment reads that pick the backend at deploy time.
 
 The frontend-serving and CORS reads are covered in `test_frontend.py`; this
 pins the database URL, which is the switch that lets Postgres drop in without a
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.config import DEFAULT_DATABASE_URL, database_url
+from backend.config import DEFAULT_DATABASE_URL, database_url
 
 
 class TestDatabaseUrl:

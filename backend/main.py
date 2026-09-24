@@ -1,6 +1,6 @@
 """FastAPI application implementing `openapi.yaml`.
 
-Run it with: `uv run uvicorn app.main:app --reload`
+Run it with: `uv run uvicorn backend.main:app --reload`
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.config import API_PREFIX, cors_origins, frontend_dir
-from app.db import init_db
-from app.errors import ApiError
-from app.routers import auth, expenses, groups, invites, payments, settlement
+from backend.config import API_PREFIX, cors_origins, frontend_dir
+from backend.db import init_db
+from backend.errors import ApiError
+from backend.routers import auth, expenses, groups, invites, payments, settlement
 
 DESCRIPTION = """
 Backend for the viloq expense-splitting app, implemented against the

@@ -6,10 +6,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.deps import DbDep, GroupIdDep, UserDep, require_group_membership
-from app.domain.balances import compute_balances
-from app.domain.settle import minimized_transfers, relationship_preserving_transfers
-from app.schemas import Error, SettlementResult, Strategy
+from backend.deps import DbDep, GroupIdDep, UserDep, require_group_membership
+from backend.domain.balances import compute_balances
+from backend.domain.settle import minimized_transfers, relationship_preserving_transfers
+from backend.schemas import Error, SettlementResult, Strategy
 
 router = APIRouter(tags=["Settlement"])
 
