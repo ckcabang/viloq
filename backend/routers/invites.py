@@ -5,17 +5,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Path, Response, status
 from typing import Annotated
 
-from app import errors, views
-from app.db import now, random_id
-from app.deps import (
+from backend import errors, views
+from backend.db import now, random_id
+from backend.deps import (
     DbDep,
     GroupIdDep,
     UserDep,
     require_creator,
     require_group_membership,
 )
-from app.models import Member as MemberRecord
-from app.schemas import Error, InviteInfo, InviteRotationResult, JoinRequest, JoinResult
+from backend.models import Member as MemberRecord
+from backend.schemas import Error, InviteInfo, InviteRotationResult, JoinRequest, JoinResult
 
 router = APIRouter(tags=["Invites"])
 

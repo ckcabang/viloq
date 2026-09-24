@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from app import models, schemas
+from backend import models, schemas
 
 
 def invite_path(code: str) -> str:

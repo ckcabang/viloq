@@ -6,9 +6,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, Path, Response, status
 
-from app import errors, views
-from app.db import Database, now, random_id
-from app.deps import (
+from backend import errors, views
+from backend.db import Database, now, random_id
+from backend.deps import (
     DbDep,
     GroupIdDep,
     IfMatchDep,
@@ -16,8 +16,8 @@ from app.deps import (
     check_version,
     require_group_membership,
 )
-from app.models import Payment as PaymentRecord
-from app.schemas import Error, Payment, PaymentInput
+from backend.models import Payment as PaymentRecord
+from backend.schemas import Error, Payment, PaymentInput
 
 router = APIRouter(tags=["Payments"])
 

@@ -21,8 +21,8 @@ from fastapi.testclient import TestClient
 # somewhere disposable before importing it, so a test run never writes a file.
 os.environ.setdefault("VILOQ_DATABASE_URL", "sqlite+pysqlite://")
 
-from app.db import Database, get_db, in_memory_database  # noqa: E402
-from app.main import app as fastapi_app  # noqa: E402
+from backend.db import Database, get_db, in_memory_database  # noqa: E402
+from backend.main import app as fastapi_app  # noqa: E402
 
 API = "/api/v1"
 

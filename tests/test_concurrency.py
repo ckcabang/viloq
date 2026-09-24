@@ -1,6 +1,6 @@
 """Two requests racing to change one record.
 
-`app/db.py` claims that a read-modify-write wrapped in `transaction()` is atomic:
+`backend/db.py` claims that a read-modify-write wrapped in `transaction()` is atomic:
 on SQLite it takes the write lock at `BEGIN IMMEDIATE`, so two edits of the same
 row cannot interleave and lose an update. That guarantee needs real connections,
 so these tests run against a file-backed database and the app's own per-request
@@ -16,9 +16,9 @@ from contextlib import ExitStack
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import Database, create_db_engine, get_db, new_session_factory
-from app.main import app as fastapi_app
-from app.models import Base
+from backend.db import Database, create_db_engine, get_db, new_session_factory
+from backend.main import app as fastapi_app
+from backend.models import Base
 from tests.conftest import Actor, sign_in
 
 

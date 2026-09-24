@@ -2,7 +2,7 @@
 
 A no-build, framework-free single-page app for the expense-splitting tool
 described in [`../_docs/specs.md`](../_docs/specs.md). It talks to the FastAPI
-backend in [`../app/`](../app/) over the contract in
+backend in [`../backend/`](../backend/) over the contract in
 [`../openapi.yaml`](../openapi.yaml).
 
 ## Run it
@@ -10,7 +10,7 @@ backend in [`../app/`](../app/) over the contract in
 The backend serves this directory, so one process is the whole app:
 
 ```bash
-uv run uvicorn app.main:app --reload   # from the repo root
+uv run uvicorn backend.main:app --reload   # from the repo root
 # then open http://127.0.0.1:8000/
 ```
 
@@ -73,7 +73,7 @@ js/
     group-admin.js    members list + group settings + invite management
 ```
 
-`js/lib/` is the client-side twin of the server's `app/domain/`: the same split,
+`js/lib/` is the client-side twin of the server's `backend/domain/`: the same split,
 balance and settlement rules, used only to preview an allocation while the user
 types. The server resolves every stored amount itself, and its answer wins.
 

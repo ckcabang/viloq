@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config import cors_origins, frontend_dir
+from backend.config import cors_origins, frontend_dir
 from tests.conftest import API
 from tests.test_contract import spec_operations
 

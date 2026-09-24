@@ -6,7 +6,7 @@ from datetime import timedelta
 
 import pytest
 
-from app.db import Database
+from backend.db import Database
 from tests.conftest import API, Actor, sign_in
 
 

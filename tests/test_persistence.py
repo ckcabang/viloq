@@ -1,4 +1,4 @@
-"""The persistence layer in isolation: `app/db.py` and `app/models.py`.
+"""The persistence layer in isolation: `backend/db.py` and `backend/models.py`.
 
 The HTTP tests exercise storage indirectly through every endpoint. These pin the
 behaviours the routers lean on but never state outright — atomic
@@ -16,15 +16,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.db import (
+from backend.db import (
     Database,
     high_entropy_token,
     in_memory_database,
     invite_code,
     random_id,
 )
-from app.errors import ApiError
-from app.models import (
+from backend.errors import ApiError
+from backend.models import (
     Expense,
     ExpenseShare,
     ExpenseShareList,
@@ -257,7 +257,7 @@ class TestIdentifiers:
             )
         )
         codes = iter([taken.invite_code, "BBB-BBB-BBB"])
-        monkeypatch.setattr("app.db.invite_code", lambda: next(codes))
+        monkeypatch.setattr("backend.db.invite_code", lambda: next(codes))
         assert db.unique_invite_code() == "BBB-BBB-BBB"
 
 
