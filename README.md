@@ -13,6 +13,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `_docs/specs.md`| V1 product specification.                                           |
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
+| `render.yaml`   | Render Blueprint: the same image plus a managed Postgres.           |
 
 ## Run it
 
@@ -56,6 +57,19 @@ unless `VILOQ_E2E_BASE_URL` points at one:
 docker compose up -d --build --wait
 VILOQ_E2E_BASE_URL=http://localhost:8000 uv run pytest tests/integration
 ```
+
+### On Render
+
+`render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec):
+the image as a web service plus a managed Postgres in the same region. In the
+Render dashboard, New > Blueprint, pick this repo, and apply; pushes to `main`
+redeploy. Render's database URL is plain `postgresql://...`, which
+`backend/config.py` turns into the psycopg URL SQLAlchemy needs.
+
+The Blueprint sets `VILOQ_EXPOSE_MAGIC_LINK=0`, since a public server that
+echoes the token lets anyone sign in as anyone; until there is a mailer,
+nobody can sign in there. The same goes for `tests/integration`, which signs in
+through the echoed token, so it cannot run against this deploy either.
 
 ## Backend
 

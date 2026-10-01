@@ -26,3 +26,11 @@ class TestDatabaseUrl:
     ):
         monkeypatch.setenv("VILOQ_DATABASE_URL", "   ")
         assert database_url() == DEFAULT_DATABASE_URL
+
+    @pytest.mark.parametrize("scheme", ["postgresql://", "postgres://"])
+    def test_a_driverless_url_gets_the_psycopg_driver(
+        self, monkeypatch: pytest.MonkeyPatch, scheme: str
+    ):
+        # The form Render's `connectionString` takes.
+        monkeypatch.setenv("VILOQ_DATABASE_URL", f"{scheme}u:pw@host:5432/viloq")
+        assert database_url() == "postgresql+psycopg://u:pw@host:5432/viloq"
