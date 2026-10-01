@@ -10,6 +10,10 @@
 #   variable RENDER_SERVICE_URL      its public URL, e.g. https://viloq.onrender.com
 # `render.yaml` turns Render's own auto-deploy off, so this is the only way a
 # commit reaches production.
+#
+# Runners are pinned to ubuntu-24.04 rather than ubuntu-latest, which moves to
+# Ubuntu 26 from 2026-10-19: `playwright install --with-deps` only supports the
+# Ubuntu releases each Playwright version knows. Move on once it supports 26.
 
 name: CI/CD
 
@@ -29,7 +33,7 @@ permissions:
 jobs:
   backend:
     name: Backend tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       # Matches `db` in compose.yaml; the tests create `viloq_test` on it.
       db:
@@ -56,7 +60,7 @@ jobs:
 
   frontend:
     name: Frontend tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
@@ -73,7 +77,7 @@ jobs:
   stack:
     name: Integration and e2e tests
     needs: [backend, frontend]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       VILOQ_E2E_BASE_URL: http://localhost:8000
     steps:
@@ -108,7 +112,7 @@ jobs:
     name: Deploy to Render
     needs: stack
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: production
       url: ${{ vars.RENDER_SERVICE_URL }}
