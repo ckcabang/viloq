@@ -19,9 +19,18 @@ DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173"
 DEFAULT_DATABASE_URL = "postgresql+psycopg://viloq:viloq@localhost:5432/viloq"
 
 
+# Hosts such as Render hand out plain `postgresql://` (or `postgres://`) URLs,
+# which SQLAlchemy reads as psycopg2, a driver this app does not install.
+_DRIVERLESS_SCHEMES = ("postgresql://", "postgres://")
+
+
 def database_url() -> str:
-    """Where to store data: a Postgres database."""
-    return os.environ.get("VILOQ_DATABASE_URL", "").strip() or DEFAULT_DATABASE_URL
+    """Where to store data: a Postgres database, always through psycopg."""
+    url = os.environ.get("VILOQ_DATABASE_URL", "").strip() or DEFAULT_DATABASE_URL
+    for scheme in _DRIVERLESS_SCHEMES:
+        if url.startswith(scheme):
+            return "postgresql+psycopg://" + url.removeprefix(scheme)
+    return url
 
 
 def expose_magic_link_token() -> bool:
