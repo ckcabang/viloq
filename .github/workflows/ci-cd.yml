@@ -1,0 +1,147 @@
+# Tests every push and pull request; deploys `main` to Render once they pass.
+#
+#   backend ─┐
+#            ├─ stack (integration + browser e2e against compose) ─ deploy (main only)
+#   frontend ┘
+#
+# Deploying needs, under Settings > Secrets and variables > Actions:
+#   secret   RENDER_DEPLOY_HOOK_URL  the web service's Settings > Deploy Hook
+#   variable RENDER_SERVICE_URL      its public URL, e.g. https://viloq.onrender.com
+# `render.yaml` turns Render's own auto-deploy off, so this is the only way a
+# commit reaches production.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      # Matches `db` in compose.yaml; the tests create `viloq_test` on it.
+      db:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: viloq
+          POSTGRES_PASSWORD: viloq
+          POSTGRES_DB: viloq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U viloq -d viloq"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      # The stack's suites run in the `stack` job, against the built image.
+      - run: uv run pytest --ignore=tests/integration --ignore=tests/e2e
+
+  frontend:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Every module parses
+        run: find js -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Unit tests
+        run: node --test 'tests/**/*.test.js'
+
+  stack:
+    name: Integration and e2e tests
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    env:
+      VILOQ_E2E_BASE_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Start the stack
+        run: docker compose up -d --build --wait
+      - run: uv sync --locked
+      - run: uv run playwright install --with-deps chromium
+      - name: Stack is healthy
+        run: curl -fsS "$VILOQ_E2E_BASE_URL/healthz"
+      - name: Integration tests
+        run: uv run pytest tests/integration
+      - name: End-to-end tests
+        run: uv run pytest tests/e2e --tracing retain-on-failure
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: test-results/
+          if-no-files-found: ignore
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Deploy to Render
+    needs: stack
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.RENDER_SERVICE_URL }}
+    # Never cancel a deploy halfway; a newer push waits its turn instead.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Trigger the deploy of this commit
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          test -n "$HOOK" || { echo "::error::RENDER_DEPLOY_HOOK_URL is not set"; exit 1; }
+          # The hook URL already carries `?key=...`.
+          curl -fsS -X POST "$HOOK&ref=$GITHUB_SHA"
+
+      - name: Wait for this commit to pass its health check
+        env:
+          SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
+        run: |
+          test -n "$SERVICE_URL" || { echo "::error::RENDER_SERVICE_URL is not set"; exit 1; }
+          # Render only routes traffic to a deploy once its own check of
+          # /healthz passes, and /healthz reports RENDER_GIT_COMMIT. So the
+          # deploy is done when the live service names this commit and is up.
+          deadline=$((SECONDS + 15 * 60))
+          while (( SECONDS < deadline )); do
+            body=$(curl -sS --max-time 10 "$SERVICE_URL/healthz" || true)
+            echo "$(date -u +%T) $body"
+            if [[ "$(jq -r '.status' <<<"$body" 2>/dev/null)" == ok &&
+                  "$(jq -r '.commit' <<<"$body" 2>/dev/null)" == "$GITHUB_SHA" ]]; then
+              echo "Deployed $GITHUB_SHA and healthy."
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::$GITHUB_SHA was not live and healthy at $SERVICE_URL/healthz within 15 minutes"
+          exit 1

@@ -53,6 +53,15 @@ def frontend_dir() -> Path | None:
     return directory if (directory / "index.html").is_file() else None
 
 
+def deployed_commit() -> str | None:
+    """The git commit this process was built from, when the host says.
+
+    Render sets `RENDER_GIT_COMMIT` on every deploy; the health check reports
+    it, so a pipeline can tell the new build is live rather than the old one.
+    """
+    return os.environ.get("RENDER_GIT_COMMIT") or None
+
+
 def cors_origins() -> list[str]:
     raw = os.environ.get("VILOQ_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
     return [origin.strip() for origin in raw.split(",") if origin.strip()]

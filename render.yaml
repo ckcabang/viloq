@@ -1,6 +1,7 @@
 # Render Blueprint: the app's image plus a managed Postgres, the same pair
 # `compose.yaml` runs locally. Create it from the Render dashboard with
-# New > Blueprint, pointing at this repo; later pushes to `main` redeploy.
+# New > Blueprint, pointing at this repo. Pushes to `main` deploy through
+# `.github/workflows/ci-cd.yml`, once its tests pass.
 # Spec: https://render.com/docs/blueprint-spec
 
 services:
@@ -11,10 +12,12 @@ services:
     plan: 0.5c-512mb
     region: oregon
     branch: main
-    autoDeployTrigger: commit
-    # The image serves the frontend at `/`; a 200 there means uvicorn is up
-    # and startup (which creates the tables) got through.
-    healthCheckPath: /
+    # Off: CI calls the deploy hook after the tests pass, rather than Render
+    # deploying every commit on its own.
+    autoDeployTrigger: "off"
+    # 200 once uvicorn is up, startup (which creates the tables) got through,
+    # and Postgres answers. It also names the commit, which CI waits for.
+    healthCheckPath: /healthz
     envVars:
       # The image's uvicorn listens on 8000; Render otherwise expects 10000.
       - key: PORT
