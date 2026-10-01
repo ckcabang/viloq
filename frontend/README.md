@@ -10,12 +10,13 @@ backend in [`../backend/`](../backend/) over the contract in
 The backend serves this directory, so one process is the whole app:
 
 ```bash
+docker compose up -d db                    # Postgres, from the repo root
 uv run uvicorn backend.main:app --reload   # from the repo root
 # then open http://127.0.0.1:8000/
 ```
 
-State lives on the server, in a SQLite database by default, and survives a
-restart. Delete `viloq.db` to start over.
+State lives on the server, in Postgres, and survives a restart.
+`docker compose down -v` deletes it.
 
 ### Serving the frontend separately
 

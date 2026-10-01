@@ -3,6 +3,11 @@
 Every test gets a clean database and a small `Actor` helper that wraps the
 TestClient with a session token, so tests read as "alice does X" rather than as
 header plumbing.
+
+The database is a real Postgres, by default the `db` service from
+`compose.yaml` (`docker compose up -d db`). Tests use their own database on it,
+`viloq_test`, created on first use and emptied after every test; point
+`VILOQ_TEST_DATABASE_URL` elsewhere to override.
 """
 
 from __future__ import annotations
@@ -15,14 +20,23 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
-# The app defaults to a SQLite file in the working directory, and its startup
-# hook creates that schema whether or not the tests override `get_db`. Point it
-# somewhere disposable before importing it, so a test run never writes a file.
-os.environ.setdefault("VILOQ_DATABASE_URL", "sqlite+pysqlite://")
+TEST_DATABASE_URL = os.environ.get(
+    "VILOQ_TEST_DATABASE_URL",
+    "postgresql+psycopg://viloq:viloq@localhost:5432/viloq_test",
+)
 
-from backend.db import Database, get_db, in_memory_database  # noqa: E402
+# The app's startup hook creates the schema in whatever `VILOQ_DATABASE_URL`
+# names, whether or not the tests override `get_db`. Point it at the test
+# database before importing it, so a test run never touches the dev data.
+os.environ["VILOQ_DATABASE_URL"] = TEST_DATABASE_URL
+
+from backend.db import Database, create_db_engine, get_db, new_session_factory  # noqa: E402
 from backend.main import app as fastapi_app  # noqa: E402
+from backend.models import Base  # noqa: E402
 
 API = "/api/v1"
 
@@ -38,10 +52,67 @@ def as_datetime(iso: str) -> datetime:
     return datetime.fromisoformat(iso)
 
 
+def _ensure_database_exists(url: str) -> None:
+    """Create the test database on its server if it is not there yet."""
+    target = make_url(url)
+    admin = create_engine(
+        target.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    try:
+        with admin.connect() as connection:
+            exists = connection.scalar(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": target.database},
+            )
+            if not exists:
+                connection.exec_driver_sql(f'CREATE DATABASE "{target.database}"')
+    finally:
+        admin.dispose()
+
+
+def empty_all_tables(engine: Engine) -> None:
+    """Delete every row the test left behind, keeping the schema."""
+    tables = ", ".join(f'"{table.name}"' for table in Base.metadata.sorted_tables)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(f"TRUNCATE {tables} CASCADE")
+
+
+@pytest.fixture(scope="session")
+def test_engine() -> Iterator[Engine]:
+    """The test database, with the schema in place. Shared by the whole run."""
+    name = make_url(TEST_DATABASE_URL).database or ""
+    if not name.endswith("_test"):
+        # Every test truncates every table: never let that loose on real data.
+        pytest.exit(
+            f"Refusing to run against database {name!r}: the test database's "
+            "name must end in '_test'.",
+            returncode=1,
+        )
+    try:
+        _ensure_database_exists(TEST_DATABASE_URL)
+    except OperationalError as exc:
+        pytest.exit(
+            "Cannot reach Postgres for the tests. Start it with "
+            "`docker compose up -d db`, or set VILOQ_TEST_DATABASE_URL.\n"
+            f"{exc.orig}",
+            returncode=1,
+        )
+    engine = create_db_engine(TEST_DATABASE_URL)
+    Base.metadata.drop_all(engine)  # whatever shape an earlier run left
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
 @pytest.fixture
-def db() -> Iterator[Database]:
-    with in_memory_database() as database:
-        yield database
+def db(test_engine: Engine) -> Iterator[Database]:
+    try:
+        with new_session_factory(test_engine)() as session:
+            yield Database(session)
+    finally:
+        # After the session closes: an open transaction would hold locks that
+        # TRUNCATE has to wait for.
+        empty_all_tables(test_engine)
 
 
 @pytest.fixture
