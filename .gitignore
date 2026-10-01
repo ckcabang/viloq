@@ -220,3 +220,5 @@ __marimo__/
 # Frontend source — the Python "lib/" ignore above otherwise swallows js/lib/
 !frontend/js/lib/
 !frontend/js/lib/**
+
+.claude/settings.local.json
