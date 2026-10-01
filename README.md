@@ -9,7 +9,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `openapi.yaml`  | The API contract. Source of truth for both sides.                   |
 | `backend/`      | FastAPI backend implementing that contract, and serving `frontend/`.|
 | `frontend/`     | The single-page app. All server calls live in `js/api.js`.          |
-| `tests/`        | Endpoint, domain, persistence, concurrency, and contract/wiring tests.|
+| `tests/`        | Endpoint, domain, persistence, concurrency, contract/wiring, and stack tests.|
 | `_docs/specs.md`| V1 product specification.                                           |
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
@@ -47,6 +47,15 @@ assembles the static files; the second is the backend, which serves them at
 `/`. The image holds no data: `compose.yaml` runs it next to Postgres and
 passes `VILOQ_DATABASE_URL`, and starts it once the database is accepting
 connections. CORS is off in the image, since the page and API share an origin.
+
+`tests/integration/` checks a running stack over real HTTP — the image's
+static files, auth, groups, expenses, conflicts and settlement. It is skipped
+unless `VILOQ_E2E_BASE_URL` points at one:
+
+```sh
+docker compose up -d --build --wait
+VILOQ_E2E_BASE_URL=http://localhost:8000 uv run pytest tests/integration
+```
 
 ## Backend
 
