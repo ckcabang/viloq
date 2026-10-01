@@ -28,8 +28,7 @@ Money is always integer minor units. Mutations of existing records require an
 `If-Match` header carrying the version the client last saw. Auth is an opaque
 bearer session token from `POST /auth/magic-links/verify`.
 
-Storage is a SQL database chosen by `VILOQ_DATABASE_URL`; it defaults to a
-SQLite file next to the working directory.
+Storage is the Postgres database named by `VILOQ_DATABASE_URL`.
 
 The frontend in `frontend/` is served at `/`, so the browser talks to this API
 from the same origin.

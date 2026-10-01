@@ -4,9 +4,8 @@ These are the shapes the database holds. They are deliberately separate from
 the wire schemas in `backend/schemas.py`: changing storage should not touch the
 HTTP contract, and vice versa.
 
-Nothing here is dialect-specific. Column types are the portable SQLAlchemy
-ones, and the two custom types below exist precisely so that SQLite and, later,
-Postgres hand the rest of the app identical Python values.
+Column types are the portable SQLAlchemy ones, mapped onto Postgres. The two
+custom types below pin down the Python values the rest of the app sees.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -31,11 +31,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class UTCDateTime(TypeDecorator):
-    """A `datetime` that is always tz-aware UTC, whatever the backend.
+    """A `datetime` that is always tz-aware UTC.
 
-    Postgres round-trips the time zone; SQLite has no time zone type and hands
-    back naive values. Normalising on the way in and out keeps comparisons like
-    `now() > link.expires_at` from raising on one backend and not the other.
+    Postgres stores `timestamptz` as an instant but hands it back in the
+    connection's time zone, and reads a naive value as local time. Normalising
+    to UTC on the way in and out keeps the values, and comparisons like
+    `now() > link.expires_at`, independent of the server's settings.
     """
 
     impl = DateTime(timezone=True)
@@ -72,9 +73,8 @@ class _DataclassList(TypeDecorator):
     """A short, always-replaced list of small records, held in one JSON column.
 
     Splits are only ever read or rewritten whole, alongside their expense, so a
-    child table would buy nothing but joins. `JSON` is generic SQLAlchemy: TEXT
-    on SQLite, `json` on Postgres (worth a `JSONB` variant if it ever needs
-    indexing).
+    child table would buy nothing but joins. `JSON` maps to Postgres `json`
+    (worth switching to `JSONB` if it ever needs indexing).
     """
 
     impl = JSON
@@ -179,7 +179,7 @@ class Expense(Base):
     group_id: Mapped[str] = mapped_column(ForeignKey("groups.id"), index=True)
     description: Mapped[str] = mapped_column(Text)
     note: Mapped[str] = mapped_column(Text, default="")
-    amount_minor: Mapped[int] = mapped_column(Integer)
+    amount_minor: Mapped[int] = mapped_column(BigInteger)
     date: Mapped[Date]
     payer_member_id: Mapped[str] = mapped_column(Id)
     split_type: Mapped[str] = mapped_column(String(20))
@@ -198,7 +198,7 @@ class Payment(Base):
     group_id: Mapped[str] = mapped_column(ForeignKey("groups.id"), index=True)
     payer_member_id: Mapped[str] = mapped_column(Id)
     recipient_member_id: Mapped[str] = mapped_column(Id)
-    amount_minor: Mapped[int] = mapped_column(Integer)
+    amount_minor: Mapped[int] = mapped_column(BigInteger)
     date: Mapped[Date]
     note: Mapped[str] = mapped_column(Text, default="")
     created_by_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))

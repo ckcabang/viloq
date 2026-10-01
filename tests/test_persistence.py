@@ -3,7 +3,7 @@
 The HTTP tests exercise storage indirectly through every endpoint. These pin the
 behaviours the routers lean on but never state outright — atomic
 read-modify-write, timezone normalisation, the JSON-backed split columns, and
-the SQLite pragmas — so a change there fails here rather than somewhere subtle
+the constraints — so a change there fails here rather than somewhere subtle
 three layers up.
 """
 
@@ -19,7 +19,6 @@ from sqlalchemy.exc import IntegrityError
 from backend.db import (
     Database,
     high_entropy_token,
-    in_memory_database,
     invite_code,
     random_id,
 )
@@ -99,9 +98,34 @@ class TestTransaction:
         user = make_user(db)
         assert db.user_by_email(user.email) is not None
 
+    def test_loaded_records_stay_readable_after_the_commit(self, db: Database):
+        with db.transaction():
+            user = db.create_user("after@example.com", display_name="After")
+        # expire_on_commit=False: the endpoint builds its response from `user`
+        # after the transaction closed, so this must not hit a detached error.
+        assert user.display_name == "After"
+
+    def test_reads_inside_a_block_see_the_latest_committed_row(
+        self, db: Database, test_engine
+    ):
+        """The lock-and-refresh read is what makes the `If-Match` check sound.
+
+        A record this session loaded earlier must not be served from the
+        session's own stale copy once a transaction reads it again.
+        """
+        user = make_user(db)
+        db.session.commit()
+        with test_engine.begin() as other:
+            other.exec_driver_sql(
+                "UPDATE users SET display_name = 'Changed' WHERE id = %s", (user.id,)
+            )
+        with db.transaction():
+            fresh = db.user_for_session(db.create_session(user.id).token)
+            assert fresh.display_name == "Changed"
+
 
 class TestUTCDateTime:
-    """SQLite has no timezone type; the column normalises both ways."""
+    """Values come back as aware UTC, whatever went in."""
 
     def test_a_naive_value_comes_back_as_aware_utc(self, db: Database):
         naive = datetime(2026, 1, 1, 12, 0, 0)
@@ -202,7 +226,7 @@ class TestSplitColumns:
         assert reloaded.shares == [ExpenseShare(member_id="mbr_1", amount_minor=100)]
 
 
-class TestSqlitePragmas:
+class TestConstraints:
     def test_foreign_keys_are_enforced(self, db: Database):
         orphan = Expense(
             id=random_id("exp"),
@@ -281,18 +305,3 @@ class TestSessionLookup:
         db.delete_session(session.token)  # already gone
         db.delete_session(None)
         assert db.user_for_session(session.token) is None
-
-
-class TestInMemoryDatabase:
-    def test_each_context_is_a_private_throwaway(self):
-        with in_memory_database() as first:
-            first.create_user("shared@example.com")
-        with in_memory_database() as second:
-            assert second.user_by_email("shared@example.com") is None
-
-    def test_loaded_records_stay_readable_after_the_commit(self, db: Database):
-        with db.transaction():
-            user = db.create_user("after@example.com", display_name="After")
-        # expire_on_commit=False: the endpoint builds its response from `user`
-        # after the transaction closed, so this must not hit a detached error.
-        assert user.display_name == "After"

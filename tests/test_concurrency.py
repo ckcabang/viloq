@@ -1,38 +1,38 @@
 """Two requests racing to change one record.
 
 `backend/db.py` claims that a read-modify-write wrapped in `transaction()` is atomic:
-on SQLite it takes the write lock at `BEGIN IMMEDIATE`, so two edits of the same
-row cannot interleave and lose an update. That guarantee needs real connections,
-so these tests run against a file-backed database and the app's own per-request
-session factory rather than the shared in-memory fixture.
+every read inside one takes a row lock (`SELECT ... FOR UPDATE`), so two edits
+of the same row cannot interleave and lose an update. That guarantee needs real,
+separate connections, so these tests give each request its own session from
+the app's per-request session factory rather than the shared `db` fixture.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.db import Database, create_db_engine, get_db, new_session_factory
+from sqlalchemy import Engine
+
+from backend.db import Database, get_db, new_session_factory
 from backend.main import app as fastapi_app
-from backend.models import Base
-from tests.conftest import Actor, sign_in
+from tests.conftest import empty_all_tables, sign_in
 
 
 @pytest.fixture
-def racing_clients(tmp_path) -> Iterator[Callable[[], TestClient]]:
-    """A factory for TestClients that all share one file-backed database.
+def racing_clients(test_engine: Engine) -> Iterator[Callable[[], TestClient]]:
+    """A factory for TestClients that each get a session per request.
 
     Each racing branch needs its own client: `httpx.Client` (which `TestClient`
     wraps) is not safe to call concurrently from multiple threads, so sharing
     one would risk transport-state errors unrelated to the DB race under test.
     """
-    engine = create_db_engine(f"sqlite+pysqlite:///{tmp_path / 'race.db'}")
-    Base.metadata.create_all(engine)
-    sessions = new_session_factory(engine)
+    sessions = new_session_factory(test_engine)
 
     def override() -> Iterator[Database]:
         with sessions() as session:
@@ -49,7 +49,7 @@ def racing_clients(tmp_path) -> Iterator[Callable[[], TestClient]]:
     finally:
         stack.close()
         fastapi_app.dependency_overrides.clear()
-        engine.dispose()
+        empty_all_tables(test_engine)
 
 
 def run_together(*targets) -> None:
@@ -81,6 +81,25 @@ def run_together(*targets) -> None:
         thread.join()
     if errors:
         raise errors[0]
+
+
+@pytest.fixture(autouse=True)
+def slow_version_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hold each request between reading a record and writing it back.
+
+    Two requests started together rarely overlap inside that window on their
+    own, so a missing lock would pass most runs. Pausing after the version check
+    makes the overlap certain: without the lock both requests read version 1
+    and both win; with it, the second is still waiting to read.
+    """
+    from backend.deps import check_version
+
+    def slow(*args, **kwargs):
+        check_version(*args, **kwargs)
+        time.sleep(0.3)
+
+    for router in ("groups", "expenses", "payments"):
+        monkeypatch.setattr(f"backend.routers.{router}.check_version", slow)
 
 
 class TestRacingEdits:

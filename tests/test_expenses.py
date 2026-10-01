@@ -47,6 +47,15 @@ class TestCreateExpense:
         assert response.headers["ETag"] == '"1"'
         assert sorted(share_map(body).values()) == [3000, 3000, 3000]
 
+    def test_an_amount_past_32_bits_is_stored_whole(
+        self, alice: Actor, trio: GroupCtx
+    ):
+        """No cap on amounts, so the column is 64-bit: a 32-bit one would 500."""
+        big = 3 * 2**31  # splits evenly three ways
+        created = create(alice, trio, amountMinor=big)
+        assert created.status_code == 201, created.text
+        assert created.json()["amountMinor"] == big
+
     def test_trims_description_and_note(self, alice: Actor, trio: GroupCtx):
         body = create(
             alice, trio, description="  Dinner  ", note="  split evenly  "

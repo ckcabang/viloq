@@ -220,8 +220,3 @@ __marimo__/
 # Frontend source — the Python "lib/" ignore above otherwise swallows js/lib/
 !frontend/js/lib/
 !frontend/js/lib/**
-
-# The default local database (VILOQ_DATABASE_URL), and its WAL sidecars
-viloq.db
-viloq.db-wal
-viloq.db-shm

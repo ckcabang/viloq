@@ -1,6 +1,7 @@
 Commands
 
 - `uv sync` - install dependencies
+- `docker compose up -d db` - start Postgres; the app and the tests need it
 - `uv run pytest` - the whole suite
 - `uv run pytest tests/test_expenses.py` - one test file
 

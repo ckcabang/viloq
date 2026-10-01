@@ -11,27 +11,42 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `frontend/`     | The single-page app. All server calls live in `js/api.js`.          |
 | `tests/`        | Endpoint, domain, persistence, concurrency, and contract/wiring tests.|
 | `_docs/specs.md`| V1 product specification.                                           |
+| `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
+| `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
 
 ## Run it
 
 ```sh
+docker compose up -d db                   # start Postgres on localhost:5432
 uv sync                                   # install dependencies
 uv run uvicorn backend.main:app --reload  # serve on http://127.0.0.1:8000
-uv run pytest                             # run the suite
+uv run pytest                             # run the suite (needs the db too)
 ```
 
 Open http://127.0.0.1:8000/ — the app and its API are one origin, so the browser
 calls `/api/v1/...` relatively and nothing needs configuring. Interactive docs
 are at `/api/v1/docs`; the generated schema at `/api/v1/openapi.json`.
 
-Data goes into `viloq.db` beside where you started the server, and survives a
-restart; delete the file to start over, or set `VILOQ_DATABASE_URL` to put it
-elsewhere (see [Storage](#storage)).
+Data goes into the `viloq` database on that Postgres and lives in the `db-data`
+volume, so it survives restarts; `docker compose down -v` deletes it. Set
+`VILOQ_DATABASE_URL` to use a different server (see [Storage](#storage)).
 
 To host the page elsewhere instead, see [`frontend/README.md`](frontend/README.md);
 `VILOQ_CORS_ORIGINS` controls which origins may call the API cross-origin
 (defaulting to `localhost:5173` and `127.0.0.1:5173` for the static-server dev
 flow).
+
+### In Docker
+
+```sh
+docker compose up --build    # app on http://localhost:8000/, plus Postgres
+```
+
+The image's first stage checks every frontend module parses under Node and
+assembles the static files; the second is the backend, which serves them at
+`/`. The image holds no data: `compose.yaml` runs it next to Postgres and
+passes `VILOQ_DATABASE_URL`, and starts it once the database is accepting
+connections. CORS is off in the image, since the page and API share an origin.
 
 ## Backend
 
@@ -58,28 +73,27 @@ server stores. Money is always integer minor units; the split allocation uses
 
 ### Storage
 
-A SQL database, reached through SQLAlchemy. `VILOQ_DATABASE_URL` chooses which
-one; it defaults to `sqlite+pysqlite:///./viloq.db`, a file beside wherever the
-server was started. Missing tables are created at startup — enough while the
-schema only grows; one that changes shape will want migrations.
+Postgres, reached through SQLAlchemy and the psycopg driver.
+`VILOQ_DATABASE_URL` names the database; it defaults to
+`postgresql+psycopg://viloq:viloq@localhost:5432/viloq`, the `db` service from
+`compose.yaml`. Missing tables are created at startup — enough while the schema
+only grows; one that changes shape will want migrations.
 
-Nothing above `backend/db.py` knows the dialect. The routers see only `Database`, a
-repository of named queries over one session, and the columns in
-`backend/models.py` are the portable SQLAlchemy types. Pointing this at Postgres is
-meant to be a driver install and a URL:
-
-```sh
-uv add psycopg
-VILOQ_DATABASE_URL='postgresql+psycopg://user:pw@localhost/viloq' uv run uvicorn backend.main:app
-```
-
-The two places that do care about the backend are `_sqlite_options` and
-`_configure_sqlite` in `backend/db.py`, which are skipped for any other dialect.
+The routers see only `Database` in `backend/db.py`, a repository of named
+queries over one session, so nothing above it writes SQL.
 
 `Database.transaction()` groups a read-modify-write into one atomic unit,
 committing on the way out and rolling back if the body raises — so a request
-rejected halfway (a `409`, say) leaves nothing behind. A write outside such a
-block commits on its own. Each request gets its own session.
+rejected halfway (a `409`, say) leaves nothing behind. Every read inside one
+locks the rows it returns (`SELECT ... FOR UPDATE`) until the commit: under
+Postgres's default isolation, two requests could otherwise both read version 1,
+both pass the `If-Match` check, and both write. With the lock, the second waits
+and then sees the first one's change. A write outside such a block commits on
+its own. Each request gets its own session.
+
+The tests run against Postgres too, in a separate `viloq_test` database on the
+same server (created on first run, emptied after every test). Point
+`VILOQ_TEST_DATABASE_URL` elsewhere to override; its name must end in `_test`.
 
 ### Conventions the contract fixes
 

@@ -2,15 +2,17 @@
 
 Everything the routers do goes through `Database`, so the rest of the app never
 sees a session, a query, or a dialect. Which database that is comes from
-`VILOQ_DATABASE_URL` (see `backend.config.database_url`) — SQLite by default, and
-nothing here is written against it. The only dialect-aware code is
-`_sqlite_options` / `_configure_sqlite`, deliberately fenced off so that adding
-Postgres later means installing a driver and setting the URL.
+`VILOQ_DATABASE_URL` (see `backend.config.database_url`): a Postgres database.
 
 Concurrency: one `Database`, holding one session, per request. Read-modify-write
-sequences are wrapped in `transaction()`, which on SQLite takes the write lock
-up front (see `_configure_sqlite`), so two requests editing the same record
-cannot interleave. A write outside such a block commits on its own.
+sequences are wrapped in `transaction()`, and every read inside one locks the
+rows it returns (`SELECT ... FOR UPDATE`). Postgres's default READ COMMITTED
+would otherwise let two requests both read version 1 of a record, both pass the
+`If-Match` check, and both write — a lost update. With the lock, the second
+request waits for the first to commit, then reads what it wrote, so it sees the
+new version (409) or no row at all (404). Every mutation reaches its group row
+first, so locks are always taken in the same order and cannot deadlock. A write
+outside such a block commits on its own.
 """
 
 from __future__ import annotations
@@ -19,12 +21,11 @@ import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from typing import TypeVar
 
-from sqlalchemy import Engine, create_engine, event, select
-from sqlalchemy.engine import make_url
+from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session as SASession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 from sqlalchemy.sql import Select
 
 from backend.config import database_url
@@ -38,6 +39,8 @@ from backend.models import (
     Session,
     User,
 )
+
+T = TypeVar("T")
 
 MAGIC_LINK_TTL_MINUTES = 15
 
@@ -65,52 +68,9 @@ def invite_code() -> str:
 # ---- Engine --------------------------------------------------------------
 
 
-def _sqlite_options(url) -> dict:
-    """Connection settings SQLite needs and other backends do not."""
-    options: dict = {
-        # Sync endpoints run in a threadpool, so connections cross threads; and
-        # a writer should wait for the lock rather than fail instantly.
-        "connect_args": {"check_same_thread": False, "timeout": 30},
-    }
-    if url.database in (None, "", ":memory:"):
-        # Every connection to an in-memory database gets its own empty one.
-        # Pinning a single connection is what makes such a URL behave.
-        options["poolclass"] = StaticPool
-    return options
-
-
-def _configure_sqlite(engine: Engine) -> None:
-    @event.listens_for(engine, "connect")
-    def _on_connect(dbapi_connection, _record) -> None:
-        # Hand transaction control to SQLAlchemy, so `_on_begin` below is the
-        # only thing that opens one.
-        dbapi_connection.isolation_level = None
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.close()
-
-    @event.listens_for(engine, "begin")
-    def _on_begin(connection) -> None:
-        # A plain SQLite BEGIN defers the write lock until the first write, so
-        # a read-modify-write can read a row that another transaction is about
-        # to change, then fail at commit. IMMEDIATE takes the lock at the start
-        # instead — the atomicity `transaction()` advertises. Other backends
-        # give the same guarantee through MVCC.
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-
-
 def create_db_engine(url: str | None = None) -> Engine:
-    """An engine for `url` (default: the configured one), tuned per dialect."""
-    parsed = make_url(url or database_url())
-    options: dict = {"pool_pre_ping": True}
-    if parsed.get_backend_name() == "sqlite":
-        options |= _sqlite_options(parsed)
-
-    engine = create_engine(parsed, **options)
-    if engine.dialect.name == "sqlite":
-        _configure_sqlite(engine)
-    return engine
+    """An engine for `url` (default: the configured one)."""
+    return create_engine(url or database_url(), pool_pre_ping=True)
 
 
 def new_session_factory(bound: Engine) -> sessionmaker[SASession]:
@@ -151,18 +111,6 @@ def get_db() -> Iterator[Database]:
     assert _sessions is not None
     with _sessions() as session:
         yield Database(session)
-
-
-@contextmanager
-def in_memory_database() -> Iterator[Database]:
-    """A private, throwaway SQLite database. For tests and scratch work."""
-    scratch = create_db_engine("sqlite+pysqlite://")
-    Base.metadata.create_all(scratch)
-    try:
-        with new_session_factory(scratch)() as session:
-            yield Database(session)
-    finally:
-        scratch.dispose()
 
 
 # ---- Repository ----------------------------------------------------------
@@ -222,11 +170,26 @@ class Database:
             self._session.delete(record)
             self._settle()
 
+    def _locking(self, statement: Select) -> Select:
+        # Inside a `transaction()`, lock what is read until the commit, and
+        # refresh any copy this session already holds: the row may have changed
+        # while the lock was being waited for.
+        if not self._depth:
+            return statement
+        return statement.with_for_update().execution_options(populate_existing=True)
+
+    def _get(self, model: type[T], key: str) -> T | None:
+        if not self._depth:
+            return self._session.get(model, key)
+        return self._session.get(
+            model, key, with_for_update=True, populate_existing=True
+        )
+
     def _first(self, statement: Select):
-        return self._session.execute(statement).scalars().first()
+        return self._session.execute(self._locking(statement)).scalars().first()
 
     def _all(self, statement: Select) -> list:
-        return list(self._session.execute(statement).scalars())
+        return list(self._session.execute(self._locking(statement)).scalars())
 
     # ---- Auth ------------------------------------------------------------
 
@@ -241,7 +204,7 @@ class Database:
         return link
 
     def magic_link(self, token: str) -> MagicLink | None:
-        return self._session.get(MagicLink, token)
+        return self._get(MagicLink, token)
 
     def user_by_email(self, email: str) -> User | None:
         return self._first(select(User).where(User.email == email))
@@ -269,16 +232,16 @@ class Database:
     def user_for_session(self, token: str | None) -> User | None:
         if not token:
             return None
-        record = self._session.get(Session, token)
-        return self._session.get(User, record.user_id) if record else None
+        record = self._get(Session, token)
+        return self._get(User, record.user_id) if record else None
 
     def delete_session(self, token: str | None) -> None:
-        self._delete(self._session.get(Session, token) if token else None)
+        self._delete(self._get(Session, token) if token else None)
 
     # ---- Groups and members ---------------------------------------------
 
     def group(self, group_id: str) -> Group | None:
-        return self._session.get(Group, group_id)
+        return self._get(Group, group_id)
 
     def unique_invite_code(self) -> str:
         """A fresh code no live group is already using."""
@@ -336,10 +299,10 @@ class Database:
         )
 
     def expense(self, expense_id: str) -> Expense | None:
-        return self._session.get(Expense, expense_id)
+        return self._get(Expense, expense_id)
 
     def payment(self, payment_id: str) -> Payment | None:
-        return self._session.get(Payment, payment_id)
+        return self._get(Payment, payment_id)
 
     def add_expense(self, expense: Expense) -> Expense:
         self._save(expense)

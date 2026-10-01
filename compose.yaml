@@ -1,0 +1,41 @@
+# The whole app: `docker compose up --build`, then open http://localhost:8000/.
+# For local development and the test suite, `docker compose up -d db` starts
+# just Postgres, published on localhost:5432 where the backend's default URL
+# and the tests look for it.
+
+services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: viloq
+      POSTGRES_PASSWORD: viloq
+      POSTGRES_DB: viloq
+    ports:
+      - "5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U viloq -d viloq"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    # `depends_on` only orders `up`: a `docker compose restart`, or Docker
+    # itself restarting, can start the app while Postgres is still down. It
+    # then fails at startup, and this brings it back until the database is up.
+    restart: unless-stopped
+    environment:
+      VILOQ_DATABASE_URL: postgresql+psycopg://viloq:viloq@db:5432/viloq
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        # The app creates its tables at startup, so Postgres must be accepting
+        # connections first.
+        condition: service_healthy
+
+volumes:
+  db-data:
