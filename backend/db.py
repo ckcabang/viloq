@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
-from sqlalchemy import Engine, create_engine, select
+from sqlalchemy import Engine, create_engine, select, text
 from sqlalchemy.orm import Session as SASession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import Select
@@ -151,6 +151,10 @@ class Database:
                 self._session.commit()
         finally:
             self._depth -= 1
+
+    def ping(self) -> None:
+        """Round-trip to the server; raises if it cannot be reached."""
+        self._session.execute(text("SELECT 1"))
 
     def _save(self, *records: object) -> None:
         """Persist new records. Edits to existing ones ride on the commit."""

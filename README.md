@@ -14,6 +14,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
 | `render.yaml`   | Render Blueprint: the same image plus a managed Postgres.           |
+| `.github/workflows/ci-cd.yml` | Tests every push and PR; deploys `main` to Render.    |
 
 ## Run it
 
@@ -50,26 +51,53 @@ passes `VILOQ_DATABASE_URL`, and starts it once the database is accepting
 connections. CORS is off in the image, since the page and API share an origin.
 
 `tests/integration/` checks a running stack over real HTTP — the image's
-static files, auth, groups, expenses, conflicts and settlement. It is skipped
-unless `VILOQ_E2E_BASE_URL` points at one:
+static files, auth, groups, expenses, conflicts and settlement.
+`tests/e2e/` drives the page in Chromium through Playwright: sign in, create a
+group, invite a second user, split an expense, settle up. Both are skipped
+unless `VILOQ_E2E_BASE_URL` points at a stack:
 
 ```sh
 docker compose up -d --build --wait
-VILOQ_E2E_BASE_URL=http://localhost:8000 uv run pytest tests/integration
+uv run playwright install chromium        # once, for tests/e2e
+VILOQ_E2E_BASE_URL=http://localhost:8000 uv run pytest tests/integration tests/e2e
 ```
+
+`GET /healthz` is `200 {"status": "ok", "commit": ...}` while the app and its
+database are up, `503` otherwise. It sits outside `/api/v1` and the contract:
+it is for the host and the pipeline, not the frontend.
 
 ### On Render
 
 `render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec):
 the image as a web service plus a managed Postgres in the same region. In the
-Render dashboard, New > Blueprint, pick this repo, and apply; pushes to `main`
-redeploy. Render's database URL is plain `postgresql://...`, which
+Render dashboard, New > Blueprint, pick this repo, and apply. Render's own
+auto-deploy is off; the pipeline below deploys instead. Render's database URL is plain `postgresql://...`, which
 `backend/config.py` turns into the psycopg URL SQLAlchemy needs.
 
 The Blueprint sets `VILOQ_EXPOSE_MAGIC_LINK=0`, since a public server that
 echoes the token lets anyone sign in as anyone; until there is a mailer,
 nobody can sign in there. The same goes for `tests/integration`, which signs in
 through the echoed token, so it cannot run against this deploy either.
+
+### CI/CD
+
+`.github/workflows/ci-cd.yml` runs on every push and pull request:
+
+1. **Backend tests** (`pytest`, against a Postgres service) and **frontend
+   tests** (`node --check` on every module, then `node --test` on
+   `frontend/tests/`) run in parallel.
+2. **Integration and e2e** builds the Compose stack and runs
+   `tests/integration` and `tests/e2e` against it.
+3. **Deploy**, on `main` only: calls the Render deploy hook for that commit,
+   then polls `/healthz` until it reports `"status": "ok"` with that commit,
+   failing after 15 minutes.
+
+The deploy job needs a repository secret `RENDER_DEPLOY_HOOK_URL` (the web
+service's Settings > Deploy Hook) and a variable `RENDER_SERVICE_URL` (its
+public URL), and runs in the `production` environment, where approvals can be
+required.
+
+Frontend unit tests alone: `node --test 'frontend/tests/**/*.test.js'` (Node 22+).
 
 ## Backend
 

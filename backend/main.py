@@ -8,15 +8,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend.config import API_PREFIX, cors_origins, frontend_dir
-from backend.db import init_db
+from backend.config import API_PREFIX, cors_origins, deployed_commit, frontend_dir
+from backend.db import Database, get_db, init_db
 from backend.errors import ApiError
 from backend.routers import auth, expenses, groups, invites, payments, settlement
 
@@ -84,6 +85,19 @@ def create_app() -> FastAPI:
         settlement.router,
     ):
         app.include_router(router, prefix=API_PREFIX)
+
+    # For the host and the deploy pipeline, not the frontend, so it sits outside
+    # `/api/v1` and the contract. Up means uvicorn answers and Postgres does too.
+    @app.get("/healthz", include_in_schema=False)
+    def health(db: Database = Depends(get_db)) -> JSONResponse:
+        try:
+            db.ping()
+        except SQLAlchemyError:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "unavailable", "commit": deployed_commit()},
+            )
+        return JSONResponse(content={"status": "ok", "commit": deployed_commit()})
 
     @app.exception_handler(ApiError)
     async def handle_api_error(_: Request, exc: ApiError) -> JSONResponse:
