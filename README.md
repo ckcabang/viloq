@@ -89,13 +89,14 @@ through the echoed token, so it cannot run against this deploy either.
 2. **Integration and e2e** builds the Compose stack and runs
    `tests/integration` and `tests/e2e` against it.
 3. **Deploy**, on `main` only: calls the Render deploy hook for that commit,
-   then polls `/healthz` until it reports `"status": "ok"` with that commit,
-   failing after 15 minutes.
+   follows that deploy through Render's API until it is `live` (failing on
+   any failed or cancelled state, or after 20 minutes), then checks that
+   `/healthz` reports `"status": "ok"` with that commit.
 
-The deploy job needs a repository secret `RENDER_DEPLOY_HOOK_URL` (the web
-service's Settings > Deploy Hook) and a variable `RENDER_SERVICE_URL` (its
-public URL), and runs in the `production` environment, where approvals can be
-required.
+The deploy job needs repository secrets `RENDER_DEPLOY_HOOK_URL` (the web
+service's Settings > Deploy Hook) and `RENDER_API_KEY` (Render's Account
+Settings > API Keys), and a variable `RENDER_SERVICE_URL` (its public URL). It
+runs in the `production` environment, where approvals can be required.
 
 Frontend unit tests alone: `node --test 'frontend/tests/**/*.test.js'` (Node 22+).
 
