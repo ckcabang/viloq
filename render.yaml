@@ -42,7 +42,8 @@ services:
           name: viloq-db
           property: connectionString
       # Off: with it on, the sign-in response hands back the token, so anyone
-      # could sign in as any email. Sign-in needs a mailer before it works here.
+      # could sign in as any email. Until there is a mailer, sign-in links are
+      # issued from the service's Shell: `python -m backend.issue_link <email>`.
       - key: VILOQ_EXPOSE_MAGIC_LINK
         value: "0"
 

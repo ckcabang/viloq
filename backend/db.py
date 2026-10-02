@@ -197,11 +197,13 @@ class Database:
 
     # ---- Auth ------------------------------------------------------------
 
-    def create_magic_link(self, email: str) -> MagicLink:
+    def create_magic_link(
+        self, email: str, ttl_minutes: int = MAGIC_LINK_TTL_MINUTES
+    ) -> MagicLink:
         link = MagicLink(
             token=high_entropy_token(18),
             email=email,
-            expires_at=now() + timedelta(minutes=MAGIC_LINK_TTL_MINUTES),
+            expires_at=now() + timedelta(minutes=ttl_minutes),
             used=False,
         )
         self._save(link)

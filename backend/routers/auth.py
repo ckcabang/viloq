@@ -22,7 +22,7 @@ from backend.schemas import (
 
 router = APIRouter(tags=["Auth"])
 
-_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @router.post(
@@ -33,7 +33,7 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 )
 def request_magic_link(body: MagicLinkRequest, db: DbDep) -> MagicLinkRequestResult:
     email = (body.email or "").strip().lower()
-    if not _EMAIL.match(email):
+    if not EMAIL_PATTERN.match(email):
         raise errors.validation("Enter a valid email address.")
 
     link = db.create_magic_link(email)
