@@ -1,5 +1,6 @@
-# Deploys the current commit to one Render service and waits until it is live
-# and healthy. Called by `ci-cd.yml`, once per environment; never runs alone.
+# Deploys a commit to one Render service and waits until it is live and
+# healthy. Called by `ci-cd.yml` (to development) and `promote.yml` (to
+# production); never runs alone.
 #
 # Needs, in the GitHub environment it deploys to (Settings > Environments):
 #   secret   RENDER_DEPLOY_HOOK_URL  that service's Settings > Deploy Hook
@@ -24,6 +25,11 @@ on:
         description: The name of the Render service, in `render.yaml`, that it deploys.
         required: true
         type: string
+      commit:
+        description: The commit to deploy, which must be on the service's branch. Defaults to the one that triggered the run.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -39,6 +45,8 @@ jobs:
     concurrency:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false
+    env:
+      COMMIT: ${{ inputs.commit || github.sha }}
     steps:
       - name: Check the deploy hook is ${{ inputs.service }}'s
         id: service
@@ -66,13 +74,13 @@ jobs:
           echo "id=$service_id" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger the deploy of this commit
+      - name: Trigger the deploy of ${{ env.COMMIT }}
         id: trigger
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
           # The hook URL already carries `?key=...`.
-          response=$(curl -fsS -X POST "$HOOK&ref=$GITHUB_SHA")
+          response=$(curl -fsS -X POST "$HOOK&ref=$COMMIT")
           echo "$response"
           # A 200 names the new deploy. A 202 (one is already running, ours
           # queues behind it) may not, and the next step looks it up instead.
@@ -95,7 +103,7 @@ jobs:
           deadline=$((SECONDS + 20 * 60))
           while (( SECONDS < deadline )); do
             if [[ -z "$DEPLOY_ID" ]]; then
-              DEPLOY_ID=$(api "deploys?limit=20" | jq -r --arg sha "$GITHUB_SHA" \
+              DEPLOY_ID=$(api "deploys?limit=20" | jq -r --arg sha "$COMMIT" \
                 '[.[].deploy | select(.commit.id == $sha)][0].id // empty' || true)
             fi
             if [[ -n "$DEPLOY_ID" ]]; then
@@ -110,11 +118,11 @@ jobs:
                   exit 1 ;;
               esac
             else
-              echo "$(date -u +%T) waiting for Render to list a deploy of $GITHUB_SHA"
+              echo "$(date -u +%T) waiting for Render to list a deploy of $COMMIT"
             fi
             sleep 15
           done
-          echo "::error::Render deploy ${DEPLOY_ID:-of $GITHUB_SHA} was not live within 20 minutes"
+          echo "::error::Render deploy ${DEPLOY_ID:-of $COMMIT} was not live within 20 minutes"
           exit 1
 
       - name: Check the live service is this commit and healthy
@@ -127,11 +135,11 @@ jobs:
             body=$(curl -sS --max-time 10 "$SERVICE_URL/healthz" || true)
             echo "$(date -u +%T) $body"
             if [[ "$(jq -r '.status' <<<"$body" 2>/dev/null)" == ok &&
-                  "$(jq -r '.commit' <<<"$body" 2>/dev/null)" == "$GITHUB_SHA" ]]; then
-              echo "Deployed $GITHUB_SHA and healthy."
+                  "$(jq -r '.commit' <<<"$body" 2>/dev/null)" == "$COMMIT" ]]; then
+              echo "Deployed $COMMIT and healthy."
               exit 0
             fi
             sleep 10
           done
-          echo "::error::$SERVICE_URL/healthz did not report $GITHUB_SHA as healthy"
+          echo "::error::$SERVICE_URL/healthz did not report $COMMIT as healthy"
           exit 1

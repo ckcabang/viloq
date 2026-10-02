@@ -14,8 +14,9 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
 | `render.yaml`   | Render Blueprint: development and production, each the image plus its own Postgres.|
-| `.github/workflows/ci-cd.yml` | Tests every push and PR; deploys `main` to development, then production.|
-| `.github/workflows/deploy.yml` | One deploy to one Render service; `ci-cd.yml` calls it per environment.|
+| `.github/workflows/ci-cd.yml` | Tests every push and PR; deploys `main` to development.|
+| `.github/workflows/promote.yml` | Run by hand: promotes what development runs to production.|
+| `.github/workflows/deploy.yml` | One deploy of one commit to one Render service, for the two above.|
 
 ## Run it
 
@@ -81,9 +82,10 @@ managed Postgres in the same region:
 They share nothing: production's data lives only in `viloq-prod-db`. In the
 Render dashboard, New > Blueprint, pick this repo, and apply. With the
 Blueprint's auto-sync on (Render's default) a resource added here is created
-when it merges to `main`; otherwise press Manual Sync on the Blueprint's page. Render's own auto-deploy is off for both; the pipeline below
-deploys instead. Render's database URL is plain `postgresql://...`, which
-`backend/config.py` turns into the psycopg URL SQLAlchemy needs.
+when it merges to `main`; otherwise press Manual Sync on the Blueprint's page.
+Render's own auto-deploy is off for both; the workflows below deploy instead.
+Render's database URL is plain `postgresql://...`, which `backend/config.py`
+turns into the psycopg URL SQLAlchemy needs.
 
 The Blueprint sets `VILOQ_EXPOSE_MAGIC_LINK=0` in both, since a public server that
 echoes the token lets anyone sign in as anyone; until there is a mailer,
@@ -99,12 +101,21 @@ through the echoed token, so it cannot run against either deploy.
    `frontend/tests/`) run in parallel.
 2. **Integration and e2e** builds the Compose stack and runs
    `tests/integration` and `tests/e2e` against it.
-3. **Deploy to development**, on `main` only, then **deploy to production**
-   once development is live and healthy on that commit. Each (`deploy.yml`)
-   checks that its deploy hook belongs to the service it expects, calls the
-   hook for that commit, follows that deploy through Render's API until it
-   is `live` (failing on any failed or cancelled state, or after 20 minutes),
-   then checks that `/healthz` reports `"status": "ok"` with that commit.
+3. **Deploy to development**, on `main` only.
+
+Production changes only when someone promotes development to it:
+Actions > **Promote to production** > Run workflow, on `main`
+(`.github/workflows/promote.yml`). It asks development's `/healthz` which
+commit it is serving, refuses unless that answers `"status": "ok"`, and
+deploys that same commit to production. So production only ever runs a commit
+that passed the pipeline and then ran on development. Promotions run one at a
+time.
+
+Every deploy, to either environment, goes through `deploy.yml`: it checks that
+its deploy hook belongs to the service it expects, calls the hook for the
+commit, follows that deploy through Render's API until it is `live` (failing
+on any failed or cancelled state, or after 20 minutes), then checks that
+`/healthz` reports `"status": "ok"` with that commit.
 
 Each deploy runs in the GitHub environment of the same name, which holds that
 environment's deploy hook as a `RENDER_DEPLOY_HOOK_URL` secret (the Render
@@ -113,8 +124,8 @@ in `production`. `RENDER_API_KEY` (Render's Account Settings > API Keys) is a
 repository secret both share. The service's URL comes from Render's API, so
 there is nothing else to set. An environment without its own hook falls back to
 a repository-level `RENDER_DEPLOY_HOOK_URL`, which the deploy then refuses if it
-belongs to the other service, rather than deploying the wrong one. Requiring
-reviewers on the `production` environment makes promotion manual.
+belongs to the other service, rather than deploying the wrong one. Required
+reviewers on the `production` environment add an approval to each promotion.
 
 Frontend unit tests alone: `node --test 'frontend/tests/**/*.test.js'` (Node 22+).
 
