@@ -88,9 +88,18 @@ Render's database URL is plain `postgresql://...`, which `backend/config.py`
 turns into the psycopg URL SQLAlchemy needs.
 
 The Blueprint sets `VILOQ_EXPOSE_MAGIC_LINK=0` in both, since a public server that
-echoes the token lets anyone sign in as anyone; until there is a mailer,
-nobody can sign in there. The same goes for `tests/integration`, which signs in
-through the echoed token, so it cannot run against either deploy.
+echoes the token lets anyone sign in as anyone. Until there is a mailer, you let
+people in by hand: open the service's Shell in the Render dashboard and run
+
+```
+python -m backend.issue_link alice@example.com
+```
+
+It prints a single-use sign-in link on the service's own URL
+(`RENDER_EXTERNAL_URL`), valid for a day (`--minutes` to change that), to pass
+on however you like. Locally it is `uv run python -m backend.issue_link ...`
+against the Compose database. `tests/integration` signs in through the echoed
+token, so it still cannot run against either deploy.
 
 ### CI/CD
 
@@ -143,6 +152,7 @@ backend/
   models.py     storage records, mapped to tables
   schemas.py    wire schemas, one per schema in openapi.yaml
   views.py      storage record -> wire shape
+  issue_link.py operator command: print a sign-in link for an email
   domain/       pure logic: split allocation, balances, settlement
   routers/      one module per tag in openapi.yaml
 ```
