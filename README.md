@@ -74,12 +74,16 @@ it is for the host and the pipeline, not the frontend.
 for two independent environments, each the image as a web service plus its own
 managed Postgres in the same region:
 
-| Environment | Web service  | Database        |
-| ----------- | ------------ | --------------- |
-| development | `viloq`      | `viloq-db`      |
-| production  | `viloq-prod` | `viloq-prod-db` |
+| Environment | Web service | Database       | Address                          |
+| ----------- | ----------- | -------------- | -------------------------------- |
+| production  | `viloq`     | `viloq-db`     | https://viloq.onrender.com       |
+| development | `viloq-dev` | `viloq-dev-db` | https://viloq-dev.onrender.com   |
 
-They share nothing: production's data lives only in `viloq-prod-db`. In the
+Render derives a service's `onrender.com` address from its name when it is
+created and never changes it, and renaming a resource in the Blueprint
+creates a new one; so the names, and the addresses, are fixed.
+
+They share nothing: production's data lives only in `viloq-db`. In the
 Render dashboard, New > Blueprint, pick this repo, and apply. With the
 Blueprint's auto-sync on (Render's default) a resource added here is created
 when it merges to `main`; otherwise press Manual Sync on the Blueprint's page.
@@ -119,7 +123,7 @@ on any failed or cancelled state, or after 20 minutes), then checks that
 
 Each deploy runs in the GitHub environment of the same name, which holds that
 environment's deploy hook as a `RENDER_DEPLOY_HOOK_URL` secret (the Render
-service's Settings > Deploy Hook): `viloq`'s in `development`, `viloq-prod`'s
+service's Settings > Deploy Hook): `viloq-dev`'s in `development`, `viloq`'s
 in `production`. `RENDER_API_KEY` (Render's Account Settings > API Keys) is a
 repository secret both share. The service's URL comes from Render's API, so
 there is nothing else to set. An environment without its own hook falls back to

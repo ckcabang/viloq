@@ -8,8 +8,8 @@
 #
 # Deploys run `deploy.yml`, here and in `promote.yml`. Each needs, under
 # Settings > Environments, that environment's own Render deploy hook:
-#   development  secret RENDER_DEPLOY_HOOK_URL  viloq's Settings > Deploy Hook
-#   production   secret RENDER_DEPLOY_HOOK_URL  viloq-prod's Settings > Deploy Hook
+#   development  secret RENDER_DEPLOY_HOOK_URL  viloq-dev's Settings > Deploy Hook
+#   production   secret RENDER_DEPLOY_HOOK_URL  viloq's Settings > Deploy Hook
 # and, under Settings > Secrets and variables > Actions:
 #   secret RENDER_API_KEY  Account Settings > API Keys, to follow the deploys
 # A repository-level RENDER_DEPLOY_HOOK_URL is the fallback for an environment
@@ -121,5 +121,5 @@ jobs:
     uses: ./.github/workflows/deploy.yml
     with:
       environment: development
-      service: viloq
+      service: viloq-dev
     secrets: inherit
