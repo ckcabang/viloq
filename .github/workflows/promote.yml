@@ -1,5 +1,5 @@
 # Promotes development to production: deploys the commit that development
-# (`viloq`) is serving and healthy on to production (`viloq-prod`). Run it by
+# (`viloq-dev`) is serving and healthy on to production (`viloq`). Run it by
 # hand from Actions > Promote to production > Run workflow, on `main`.
 #
 #   find (what development serves) ─ deploy (that commit, via deploy.yml)
@@ -38,7 +38,7 @@ jobs:
         id: dev
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          SERVICE: viloq
+          SERVICE: viloq-dev
         run: |
           test -n "$RENDER_API_KEY" || { echo "::error::RENDER_API_KEY is not set"; exit 1; }
           services=$(curl -fsS --max-time 20 -H "Authorization: Bearer $RENDER_API_KEY" \
@@ -68,6 +68,6 @@ jobs:
     uses: ./.github/workflows/deploy.yml
     with:
       environment: production
-      service: viloq-prod
+      service: viloq
       commit: ${{ needs.find.outputs.commit }}
     secrets: inherit

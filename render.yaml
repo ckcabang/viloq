@@ -1,12 +1,14 @@
 # Render Blueprint: two independent copies of the app's image plus a managed
 # Postgres, the same pair `compose.yaml` runs locally.
 #
-#   development  viloq       + viloq-db
-#   production   viloq-prod  + viloq-prod-db
+#   production   viloq      + viloq-db      https://viloq.onrender.com
+#   development  viloq-dev  + viloq-dev-db  https://viloq-dev.onrender.com
 #
 # Each service reads only its own database; nothing is shared between them.
-# Development keeps the original names: renaming a resource here would make
-# Render create a fresh one and detach the old one, data and all.
+# A service's onrender.com address comes from its name when it is created and
+# never changes, so these names are what fix the addresses above. Renaming one
+# here would make Render create a fresh resource, with a new address, and
+# detach the old one, data and all.
 #
 # Create it from the Render dashboard with New > Blueprint, pointing at this
 # repo. Pushes to `main` deploy to development through
@@ -15,7 +17,7 @@
 # Spec: https://render.com/docs/blueprint-spec
 
 services:
-  # --- Development --------------------------------------------------------------
+  # --- Production ---------------------------------------------------------------
   - type: web
     name: viloq
     runtime: docker
@@ -44,10 +46,10 @@ services:
       - key: VILOQ_EXPOSE_MAGIC_LINK
         value: "0"
 
-  # --- Production ---------------------------------------------------------------
-  # The same as development, on its own database.
+  # --- Development --------------------------------------------------------------
+  # The same as production, on its own database.
   - type: web
-    name: viloq-prod
+    name: viloq-dev
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: 0.5c-512mb
@@ -60,13 +62,13 @@ services:
         value: "8000"
       - key: VILOQ_DATABASE_URL
         fromDatabase:
-          name: viloq-prod-db
+          name: viloq-dev-db
           property: connectionString
       - key: VILOQ_EXPOSE_MAGIC_LINK
         value: "0"
 
 databases:
-  # --- Development --------------------------------------------------------------
+  # --- Production ---------------------------------------------------------------
   - name: viloq-db
     databaseName: viloq
     user: viloq
@@ -76,8 +78,8 @@ databases:
     # Reachable only from services in this workspace, not the internet.
     ipAllowList: []
 
-  # --- Production ---------------------------------------------------------------
-  - name: viloq-prod-db
+  # --- Development --------------------------------------------------------------
+  - name: viloq-dev-db
     databaseName: viloq
     user: viloq
     plan: 0.1c-256mb
