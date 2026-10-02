@@ -13,8 +13,10 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `_docs/specs.md`| V1 product specification.                                           |
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
-| `render.yaml`   | Render Blueprint: the same image plus a managed Postgres.           |
-| `.github/workflows/ci-cd.yml` | Tests every push and PR; deploys `main` to Render.    |
+| `render.yaml`   | Render Blueprint: development and production, each the image plus its own Postgres.|
+| `.github/workflows/ci-cd.yml` | Tests every push and PR; deploys `main` to development.|
+| `.github/workflows/promote.yml` | Run by hand: promotes what development runs to production.|
+| `.github/workflows/deploy.yml` | One deploy of one commit to one Render service, for the two above.|
 
 ## Run it
 
@@ -68,16 +70,27 @@ it is for the host and the pipeline, not the frontend.
 
 ### On Render
 
-`render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec):
-the image as a web service plus a managed Postgres in the same region. In the
-Render dashboard, New > Blueprint, pick this repo, and apply. Render's own
-auto-deploy is off; the pipeline below deploys instead. Render's database URL is plain `postgresql://...`, which
-`backend/config.py` turns into the psycopg URL SQLAlchemy needs.
+`render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec)
+for two independent environments, each the image as a web service plus its own
+managed Postgres in the same region:
 
-The Blueprint sets `VILOQ_EXPOSE_MAGIC_LINK=0`, since a public server that
+| Environment | Web service  | Database        |
+| ----------- | ------------ | --------------- |
+| development | `viloq`      | `viloq-db`      |
+| production  | `viloq-prod` | `viloq-prod-db` |
+
+They share nothing: production's data lives only in `viloq-prod-db`. In the
+Render dashboard, New > Blueprint, pick this repo, and apply. With the
+Blueprint's auto-sync on (Render's default) a resource added here is created
+when it merges to `main`; otherwise press Manual Sync on the Blueprint's page.
+Render's own auto-deploy is off for both; the workflows below deploy instead.
+Render's database URL is plain `postgresql://...`, which `backend/config.py`
+turns into the psycopg URL SQLAlchemy needs.
+
+The Blueprint sets `VILOQ_EXPOSE_MAGIC_LINK=0` in both, since a public server that
 echoes the token lets anyone sign in as anyone; until there is a mailer,
 nobody can sign in there. The same goes for `tests/integration`, which signs in
-through the echoed token, so it cannot run against this deploy either.
+through the echoed token, so it cannot run against either deploy.
 
 ### CI/CD
 
@@ -88,15 +101,31 @@ through the echoed token, so it cannot run against this deploy either.
    `frontend/tests/`) run in parallel.
 2. **Integration and e2e** builds the Compose stack and runs
    `tests/integration` and `tests/e2e` against it.
-3. **Deploy**, on `main` only: calls the Render deploy hook for that commit,
-   follows that deploy through Render's API until it is `live` (failing on
-   any failed or cancelled state, or after 20 minutes), then checks that
-   `/healthz` reports `"status": "ok"` with that commit.
+3. **Deploy to development**, on `main` only.
 
-The deploy job needs repository secrets `RENDER_DEPLOY_HOOK_URL` (the web
-service's Settings > Deploy Hook) and `RENDER_API_KEY` (Render's Account
-Settings > API Keys), and a variable `RENDER_SERVICE_URL` (its public URL). It
-runs in the `production` environment, where approvals can be required.
+Production changes only when someone promotes development to it:
+Actions > **Promote to production** > Run workflow, on `main`
+(`.github/workflows/promote.yml`). It asks development's `/healthz` which
+commit it is serving, refuses unless that answers `"status": "ok"`, and
+deploys that same commit to production. So production only ever runs a commit
+that passed the pipeline and then ran on development. Promotions run one at a
+time.
+
+Every deploy, to either environment, goes through `deploy.yml`: it checks that
+its deploy hook belongs to the service it expects, calls the hook for the
+commit, follows that deploy through Render's API until it is `live` (failing
+on any failed or cancelled state, or after 20 minutes), then checks that
+`/healthz` reports `"status": "ok"` with that commit.
+
+Each deploy runs in the GitHub environment of the same name, which holds that
+environment's deploy hook as a `RENDER_DEPLOY_HOOK_URL` secret (the Render
+service's Settings > Deploy Hook): `viloq`'s in `development`, `viloq-prod`'s
+in `production`. `RENDER_API_KEY` (Render's Account Settings > API Keys) is a
+repository secret both share. The service's URL comes from Render's API, so
+there is nothing else to set. An environment without its own hook falls back to
+a repository-level `RENDER_DEPLOY_HOOK_URL`, which the deploy then refuses if it
+belongs to the other service, rather than deploying the wrong one. Required
+reviewers on the `production` environment add an approval to each promotion.
 
 Frontend unit tests alone: `node --test 'frontend/tests/**/*.test.js'` (Node 22+).
 

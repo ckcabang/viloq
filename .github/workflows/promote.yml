@@ -1,0 +1,73 @@
+# Promotes development to production: deploys the commit that development
+# (`viloq`) is serving and healthy on to production (`viloq-prod`). Run it by
+# hand from Actions > Promote to production > Run workflow, on `main`.
+#
+#   find (what development serves) ─ deploy (that commit, via deploy.yml)
+#
+# Pushes to `main` reach development only (`ci-cd.yml`); this is the only way a
+# commit reaches production. Development only ever runs commits that passed
+# `ci-cd.yml`'s tests, since that is the only thing that deploys it.
+#
+# Needs the same secrets as `deploy.yml`: RENDER_API_KEY, and production's own
+# RENDER_DEPLOY_HOOK_URL in the `production` environment. Required reviewers on
+# that environment add an approval before the deploy starts.
+
+name: Promote to production
+
+on:
+  workflow_dispatch:
+
+# One promotion at a time; a second one waits rather than racing the first.
+concurrency:
+  group: promote-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  find:
+    name: Find development's version
+    # The deploy runs `deploy.yml` from the chosen ref; only `main`'s is trusted.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.dev.outputs.commit }}
+    steps:
+      - name: Ask development which commit it serves
+        id: dev
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE: viloq
+        run: |
+          test -n "$RENDER_API_KEY" || { echo "::error::RENDER_API_KEY is not set"; exit 1; }
+          services=$(curl -fsS --max-time 20 -H "Authorization: Bearer $RENDER_API_KEY" \
+            "https://api.render.com/v1/services?name=$SERVICE&type=web_service&limit=20")
+          urls=$(jq -r --arg name "$SERVICE" \
+            '[.[].service | select(.name == $name) | .serviceDetails.url // empty] | .[]' <<<"$services")
+          [[ $(grep -c . <<<"$urls") == 1 ]] || { echo "::error::Expected one Render web service named $SERVICE, found: ${urls:-none}"; exit 1; }
+
+          # What it serves, not what Render last deployed: `/healthz` names the
+          # running commit, and only answers ok while it and its database are up.
+          body=$(curl -fsS --max-time 10 "$urls/healthz") || { echo "::error::$urls/healthz is not healthy; fix development first"; exit 1; }
+          echo "$body"
+          [[ "$(jq -r '.status' <<<"$body")" == ok ]] || { echo "::error::$urls/healthz does not report ok"; exit 1; }
+          commit=$(jq -r '.commit // empty' <<<"$body")
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::$urls/healthz names no commit"; exit 1; }
+
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Promoting development to production"
+            echo
+            echo "Commit [\`${commit:0:7}\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$commit), served by $urls"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to production
+    needs: find
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      service: viloq-prod
+      commit: ${{ needs.find.outputs.commit }}
+    secrets: inherit

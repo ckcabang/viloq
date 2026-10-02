@@ -1,15 +1,21 @@
-# Tests every push and pull request; deploys `main` to Render once they pass.
+# Tests every push and pull request; deploys `main` to Render's development
+# environment once they pass (see `render.yaml`). Production is deployed only
+# by promoting what development runs, by hand, with `promote.yml`.
 #
 #   backend ─┐
-#            ├─ stack (integration + browser e2e against compose) ─ deploy (main only)
+#            ├─ stack (integration + browser e2e against compose) ─ deploy-development (main only)
 #   frontend ┘
 #
-# Deploying needs, under Settings > Secrets and variables > Actions:
-#   secret   RENDER_DEPLOY_HOOK_URL  the web service's Settings > Deploy Hook
-#   secret   RENDER_API_KEY          Account Settings > API Keys, to follow the deploy
-#   variable RENDER_SERVICE_URL      its public URL, e.g. https://viloq.onrender.com
-# `render.yaml` turns Render's own auto-deploy off, so this is the only way a
-# commit reaches production.
+# Deploys run `deploy.yml`, here and in `promote.yml`. Each needs, under
+# Settings > Environments, that environment's own Render deploy hook:
+#   development  secret RENDER_DEPLOY_HOOK_URL  viloq's Settings > Deploy Hook
+#   production   secret RENDER_DEPLOY_HOOK_URL  viloq-prod's Settings > Deploy Hook
+# and, under Settings > Secrets and variables > Actions:
+#   secret RENDER_API_KEY  Account Settings > API Keys, to follow the deploys
+# A repository-level RENDER_DEPLOY_HOOK_URL is the fallback for an environment
+# without one; `deploy.yml` refuses it unless it names that environment's
+# service. `render.yaml` turns Render's own auto-deploy off, so these two
+# workflows are the only way a commit reaches either one.
 #
 # Runners are pinned to ubuntu-24.04 rather than ubuntu-latest, which moves to
 # Ubuntu 26 from 2026-10-19: `playwright install --with-deps` only supports the
@@ -108,91 +114,12 @@ jobs:
         if: always()
         run: docker compose down -v
 
-  deploy:
-    name: Deploy to Render
+  deploy-development:
+    name: Deploy to development
     needs: stack
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    environment:
-      name: production
-      url: ${{ vars.RENDER_SERVICE_URL }}
-    # Never cancel a deploy halfway; a newer push waits its turn instead.
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false
-    steps:
-      - name: Trigger the deploy of this commit
-        id: trigger
-        env:
-          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: |
-          test -n "$HOOK" || { echo "::error::RENDER_DEPLOY_HOOK_URL is not set"; exit 1; }
-          # The hook URL already carries `?key=...`.
-          response=$(curl -fsS -X POST "$HOOK&ref=$GITHUB_SHA")
-          echo "$response"
-          # A 200 names the new deploy. A 202 (one is already running, ours
-          # queues behind it) may not, and the next step looks it up instead.
-          echo "deploy_id=$(jq -r '.deploy.id // empty' <<<"$response" 2>/dev/null)" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for that deploy to go live
-        env:
-          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
-        run: |
-          test -n "$RENDER_API_KEY" || { echo "::error::RENDER_API_KEY is not set"; exit 1; }
-          # The hook is https://api.render.com/deploy/srv-...?key=...
-          service_id=$(sed -E 's#.*/deploy/(srv-[^?/]+).*#\1#' <<<"$HOOK")
-          [[ "$service_id" == srv-* ]] || { echo "::error::No service id in the deploy hook URL"; exit 1; }
-          api() {
-            curl -fsS --max-time 20 -H "Authorization: Bearer $RENDER_API_KEY" \
-              "https://api.render.com/v1/services/$service_id/$1"
-          }
-
-          # Follow this deploy, not merely whatever is live: a redeploy of a
-          # commit that is already serving would otherwise pass at once, even
-          # if the new deploy then failed.
-          deadline=$((SECONDS + 20 * 60))
-          while (( SECONDS < deadline )); do
-            if [[ -z "$DEPLOY_ID" ]]; then
-              DEPLOY_ID=$(api "deploys?limit=20" | jq -r --arg sha "$GITHUB_SHA" \
-                '[.[].deploy | select(.commit.id == $sha)][0].id // empty' || true)
-            fi
-            if [[ -n "$DEPLOY_ID" ]]; then
-              status=$(api "deploys/$DEPLOY_ID" | jq -r '.status' || echo unknown)
-              echo "$(date -u +%T) $DEPLOY_ID $status"
-              case "$status" in
-                live)
-                  echo "deploy $DEPLOY_ID is live"
-                  exit 0 ;;
-                build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
-                  echo "::error::Render deploy $DEPLOY_ID ended $status: https://dashboard.render.com/web/$service_id/deploys/$DEPLOY_ID"
-                  exit 1 ;;
-              esac
-            else
-              echo "$(date -u +%T) waiting for Render to list a deploy of $GITHUB_SHA"
-            fi
-            sleep 15
-          done
-          echo "::error::Render deploy ${DEPLOY_ID:-of $GITHUB_SHA} was not live within 20 minutes"
-          exit 1
-
-      - name: Check the live service is this commit and healthy
-        env:
-          SERVICE_URL: ${{ vars.RENDER_SERVICE_URL }}
-        run: |
-          test -n "$SERVICE_URL" || { echo "::error::RENDER_SERVICE_URL is not set"; exit 1; }
-          # Live means Render's own /healthz check passed and traffic moved
-          # over; confirm from outside, allowing a moment for routing.
-          for _ in $(seq 1 12); do
-            body=$(curl -sS --max-time 10 "$SERVICE_URL/healthz" || true)
-            echo "$(date -u +%T) $body"
-            if [[ "$(jq -r '.status' <<<"$body" 2>/dev/null)" == ok &&
-                  "$(jq -r '.commit' <<<"$body" 2>/dev/null)" == "$GITHUB_SHA" ]]; then
-              echo "Deployed $GITHUB_SHA and healthy."
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::$SERVICE_URL/healthz did not report $GITHUB_SHA as healthy"
-          exit 1
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: development
+      service: viloq
+    secrets: inherit
