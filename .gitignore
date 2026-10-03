@@ -222,3 +222,7 @@ __marimo__/
 !frontend/js/lib/**
 
 .claude/settings.local.json
+
+# What on-call-engineer/poll.py writes as it runs
+on-call-engineer/reports/
+on-call-engineer/state.json
