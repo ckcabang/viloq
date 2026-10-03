@@ -13,7 +13,8 @@ handed over is kept in `state.json`, so a restart does not repeat it.
 The agent is told what `instructions.md` says, followed by the alert. It works
 in a git worktree of its own, on a new `on-call/...` branch from `main`, so
 whatever it commits stays off `main` (which deploys) and out of the checkout
-you work in; nothing is pushed. Its final reply goes to `reports/`. See
+you work in; nothing is pushed. Its final reply goes to `reports/`. An agent
+that commits nothing has its worktree and branch removed once it exits. See
 README.md for the settings.
 
 Standard library only: it runs wherever `uv run` does, beside the app.
@@ -217,6 +218,7 @@ class Running:
     process: subprocess.Popen
     report: Path
     branch: str
+    worktree: Path
 
 
 @dataclass
@@ -302,7 +304,7 @@ class OnCall:
         process.stdin.write(prompt_for(alert, instructions, branch, self.settings.base))
         process.stdin.close()
         log(f"agent {process.pid} on {branch} in {worktree}, reporting to {report}")
-        return Running(alert_key(alert), process, report, branch)
+        return Running(alert_key(alert), process, report, branch, worktree)
 
     def reap(self) -> None:
         for job in list(self.running):
@@ -322,7 +324,34 @@ class OnCall:
                     f"{commits} commit(s) on {job.branch}: see "
                     f"{job.report.with_suffix('.log')}"
                 )
+            if commits == 0:
+                self.remove_worktree(job)
         self.dispatch()
+
+    def remove_worktree(self, job: Running) -> None:
+        """Removes the worktree and branch of an agent that committed nothing,
+        so only fixes are left to review; its report stays. Kept if it left
+        changes uncommitted, which may be work worth reading."""
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=job.worktree,
+            capture_output=True,
+            text=True,
+        )
+        if status.returncode != 0 or status.stdout.strip():
+            log(f"kept {job.worktree}: it has uncommitted changes")
+            return
+        for command in (
+            ["git", "worktree", "remove", str(job.worktree)],
+            ["git", "branch", "-D", job.branch],
+        ):
+            result = subprocess.run(
+                command, cwd=REPO_ROOT, capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                log(f"could not remove {job.worktree}: {result.stderr.strip()}")
+                return
+        log(f"removed {job.worktree} and {job.branch}: no commits")
 
     def commits_on(self, branch: str) -> int | str:
         result = subprocess.run(

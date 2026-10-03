@@ -43,6 +43,14 @@ FAKE_AGENT = (
     " subprocess.run(['git', 'add', 'fix.txt'], check=True);"
     " subprocess.run(['git', 'commit', '-qm', 'Fix it'], check=True)",
 )
+# Reports a false positive and changes nothing.
+QUIET_AGENT = (sys.executable, "-c", "import sys; sys.stdin.read(); print('No bug.')")
+# Edits a file but stops before committing it.
+UNFINISHED_AGENT = (
+    sys.executable,
+    "-c",
+    "import sys; sys.stdin.read(); open('README.md', 'a').write('half a fix')",
+)
 
 
 def firing(fingerprint: str = "a1d50d47a4609f54", starts: str = "2026-10-03T19:53:30Z"):
@@ -217,6 +225,25 @@ class TestHandOver:
         grafana.alerts = [firing(starts="2026-10-03T21:00:00Z")]
         run_once(settings)
         assert len(list(settings.reports.glob("*.md"))) == 2
+
+    def test_an_agent_that_commits_nothing_leaves_only_its_report(
+        self, grafana: Grafana, settings, repo: Path
+    ):
+        grafana.alerts = [firing()]
+        run_once(replace(settings, agent=QUIET_AGENT))
+        assert not git(repo, "branch", "--list", "on-call/*").strip()
+        assert not list(settings.worktrees.iterdir())
+        (report,) = settings.reports.glob("*.md")
+        assert report.read_text(encoding="utf-8").strip() == "No bug."
+
+    def test_uncommitted_changes_keep_the_worktree(
+        self, grafana: Grafana, settings, repo: Path
+    ):
+        grafana.alerts = [firing()]
+        run_once(replace(settings, agent=UNFINISHED_AGENT))
+        assert git(repo, "branch", "--list", "on-call/*").strip()
+        (worktree,) = settings.worktrees.iterdir()
+        assert "half a fix" in (worktree / "README.md").read_text()
 
     def test_an_unreachable_grafana_is_logged_and_retried(
         self, settings, capsys: pytest.CaptureFixture

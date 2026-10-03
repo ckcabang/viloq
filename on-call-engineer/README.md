@@ -30,6 +30,9 @@ it is not running.
 4. The agent's final reply goes to `reports/<same name>.md`, what it printed
    to stderr to `.log` beside it. Once it exits, the poller logs how many
    commits it left on the branch.
+5. If it committed nothing, the poller removes its worktree and branch, and
+   only the report stays. If it left changes uncommitted, they are kept, to
+   read.
 
 Each firing is handed over once. An alert still firing on the next poll, or
 after a restart, is not handed over again; `state.json` records what was. One
@@ -52,7 +55,9 @@ PID. Then remove its worktree and branch as below.
 
 ## Reviewing what it did
 
-The fix is a commit on the `on-call/...` branch, nowhere else: not on
+Only an agent that committed, or left changes uncommitted, leaves a
+worktree and branch behind. The fix is a commit on the `on-call/...` branch,
+nowhere else: not on
 `main`, which deploys on push, not in the checkout you work in, and not
 pushed. To take it:
 
