@@ -14,9 +14,9 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
 | `render.yaml`   | Render Blueprint: development and production, each the image plus its own Postgres.|
-| `.github/workflows/ci-cd.yml` | Tests every push and PR; deploys `main` to development.|
-| `.github/workflows/promote.yml` | Run by hand: promotes what development runs to production.|
-| `.github/workflows/deploy.yml` | One deploy of one commit to one Render service, for the two above.|
+| `.github/workflows/ci-cd.yml` | Tests every push and PR and builds the image; on `main`, pushes it and deploys it to development.|
+| `.github/workflows/promote.yml` | Run by hand: promotes the image development runs to production.|
+| `.github/workflows/deploy.yml` | One deploy of one image to one Render service, for the two above.|
 
 ## Run it
 
@@ -64,15 +64,19 @@ uv run playwright install chromium        # once, for tests/e2e
 VILOQ_E2E_BASE_URL=http://localhost:8000 uv run pytest tests/integration tests/e2e
 ```
 
-`GET /healthz` is `200 {"status": "ok", "commit": ...}` while the app and its
-database are up, `503` otherwise. It sits outside `/api/v1` and the contract:
-it is for the host and the pipeline, not the frontend.
+`GET /healthz` is `200 {"status": "ok", "commit": ..., "image": ...}` while
+the app and its database are up, `503` otherwise. `commit` and `image` (its
+`YYYYMMDD-HHMMSS-shortsha` tag) are baked in when CI builds the image, and
+`null` in a local build. It sits outside `/api/v1` and the contract: it is for
+the host and the pipeline, not the frontend.
 
 ### On Render
 
 `render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec)
 for two independent environments, each the image as a web service plus its own
-managed Postgres in the same region:
+managed Postgres in the same region. Render builds nothing: both services pull
+the image CI built from `ghcr.io/ckcabang/viloq`, a public package since this is
+a public repository.
 
 | Environment | Web service | Database       | Address                          |
 | ----------- | ----------- | -------------- | -------------------------------- |
@@ -87,7 +91,11 @@ They share nothing: production's data lives only in `viloq-db`. In the
 Render dashboard, New > Blueprint, pick this repo, and apply. With the
 Blueprint's auto-sync on (Render's default) a resource added here is created
 when it merges to `main`; otherwise press Manual Sync on the Blueprint's page.
-Render's own auto-deploy is off for both; the workflows below deploy instead.
+Image-backed services never redeploy on their own; the workflows below deploy
+them. Each service names its environment's tag, `:development` or
+`:production`, which every deploy moves onto the image it put there, so a
+Blueprint sync redeploys what the service already runs rather than an older
+image.
 Render's database URL is plain `postgresql://...`, which `backend/config.py`
 turns into the psycopg URL SQLAlchemy needs.
 
@@ -109,26 +117,31 @@ token, so it still cannot run against either deploy.
 
 `.github/workflows/ci-cd.yml` runs on every push and pull request:
 
-1. **Backend tests** (`pytest`, against a Postgres service) and **frontend
+1. **Backend tests** (`pytest`, against a Postgres service), **frontend
    tests** (`node --check` on every module, then `node --test` on
-   `frontend/tests/`) run in parallel.
-2. **Integration and e2e** builds the Compose stack and runs
-   `tests/integration` and `tests/e2e` against it.
-3. **Deploy to development**, on `main` only.
+   `frontend/tests/`) and **Build the image** run in parallel. The build tags
+   the image `YYYYMMDD-HHMMSS-shortsha` (UTC build time, then the commit, e.g.
+   `20260818-163457-83242da`) and, on `main` only, pushes it to
+   `ghcr.io/ckcabang/viloq`.
+2. **Integration and e2e** runs that same image in the Compose stack
+   (`VILOQ_APP_IMAGE`, `--no-build`) and runs `tests/integration` and
+   `tests/e2e` against it.
+3. **Deploy to development**, on `main` only: Render pulls that image.
 
 Production changes only when someone promotes development to it:
 Actions > **Promote to production** > Run workflow, on `main`
 (`.github/workflows/promote.yml`). It asks development's `/healthz` which
-commit it is serving, refuses unless that answers `"status": "ok"`, and
-deploys that same commit to production. So production only ever runs a commit
-that passed the pipeline and then ran on development. Promotions run one at a
-time.
+image it is serving, refuses unless that answers `"status": "ok"`, and
+deploys that same image to production, without rebuilding it. So production
+only ever runs an image that passed the pipeline and then ran on development.
+Promotions run one at a time.
 
 Every deploy, to either environment, goes through `deploy.yml`: it checks that
-its deploy hook belongs to the service it expects, calls the hook for the
-commit, follows that deploy through Render's API until it is `live` (failing
-on any failed or cancelled state, or after 20 minutes), then checks that
-`/healthz` reports `"status": "ok"` with that commit.
+the image is in the registry and that its deploy hook belongs to the service
+it expects, calls the hook with the image (`imgURL`), follows that deploy
+through Render's API until it is `live` (failing on any failed or cancelled
+state, or after 20 minutes), checks that `/healthz` reports `"status": "ok"`
+with that image, and then moves the environment's tag onto it.
 
 Each deploy runs in the GitHub environment of the same name, which holds that
 environment's deploy hook as a `RENDER_DEPLOY_HOOK_URL` secret (the Render

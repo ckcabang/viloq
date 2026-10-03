@@ -14,13 +14,19 @@ class TestHealth:
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
-    def test_reports_the_deployed_commit(self, client, monkeypatch):
-        monkeypatch.setenv("RENDER_GIT_COMMIT", "abc123")
-        assert client.get("/healthz").json()["commit"] == "abc123"
+    def test_reports_the_image_ci_built(self, client, monkeypatch):
+        monkeypatch.setenv("VILOQ_COMMIT", "83242da" + "0" * 33)
+        monkeypatch.setenv("VILOQ_IMAGE_TAG", "20260818-163457-83242da")
+        body = client.get("/healthz").json()
+        assert body["commit"] == "83242da" + "0" * 33
+        assert body["image"] == "20260818-163457-83242da"
 
-    def test_no_commit_outside_render(self, client, monkeypatch):
-        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
-        assert client.get("/healthz").json()["commit"] is None
+    def test_no_build_outside_ci(self, client, monkeypatch):
+        monkeypatch.delenv("VILOQ_COMMIT", raising=False)
+        monkeypatch.delenv("VILOQ_IMAGE_TAG", raising=False)
+        body = client.get("/healthz").json()
+        assert body["commit"] is None
+        assert body["image"] is None
 
     def test_unavailable_when_the_database_is_not(self, app, client, db):
         class Unreachable(Database):

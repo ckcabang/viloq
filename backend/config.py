@@ -54,12 +54,22 @@ def frontend_dir() -> Path | None:
 
 
 def deployed_commit() -> str | None:
-    """The git commit this process was built from, when the host says.
+    """The git commit the image was built from, when CI built it.
 
-    Render sets `RENDER_GIT_COMMIT` on every deploy; the health check reports
-    it, so a pipeline can tell the new build is live rather than the old one.
+    CI bakes `VILOQ_COMMIT` into the image (see the Dockerfile); a local
+    `docker compose up --build` leaves it unset.
     """
-    return os.environ.get("RENDER_GIT_COMMIT") or None
+    return os.environ.get("VILOQ_COMMIT") or None
+
+
+def deployed_image() -> str | None:
+    """The tag of the image this process runs, `YYYYMMDD-HHMMSS-shortsha`.
+
+    Baked in by CI like `VILOQ_COMMIT`. The health check reports it, so a
+    deploy can tell the new image is live rather than the old one, and a
+    promotion can ask development which image to send on to production.
+    """
+    return os.environ.get("VILOQ_IMAGE_TAG") or None
 
 
 def cors_origins() -> list[str]:
