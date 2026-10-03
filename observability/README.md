@@ -60,11 +60,33 @@ production share it.
 2. In the Grafana Cloud portal, on your stack, open the **OpenTelemetry** tile
    and generate a token. It shows the two values the app needs:
    `OTEL_EXPORTER_OTLP_ENDPOINT` (`https://otlp-gateway-prod-<region>.grafana.net/otlp`)
-   and `OTEL_EXPORTER_OTLP_HEADERS` (`Authorization=Basic%20<...>`). The space
-   after `Basic` must be written `%20`.
+   and `OTEL_EXPORTER_OTLP_HEADERS`.
 3. In the Render dashboard, set both on `viloq` and on `viloq-dev`, under each
-   service's Environment. `render.yaml` declares them with `sync: false`, so
-   they are kept out of the repository and a Blueprint sync leaves them alone.
+   service's Environment, then **Save and deploy**: the app reads them only at
+   startup. `render.yaml` declares them with `sync: false`, so they are kept
+   out of the repository and a Blueprint sync leaves them alone.
+
+The headers value is the whole of
+
+```
+Authorization=Basic <base64 of INSTANCE_ID:TOKEN>
+```
+
+with no quotes around it. The tile shows it inside a shell
+`export ...="..."`, and Render would keep those quotes as part of the
+value. `Authorization=` is required too, and what follows `Basic ` is the
+encoded `INSTANCE_ID:TOKEN`, not the bare `glc_...` token. The instance ID is
+the one on the OpenTelemetry tile, not the user ID the Prometheus, Loki or
+Tempo data sources show. The space after `Basic` may be a space or `%20`.
+
+If it is wrong, the service's Logs say so once a minute, at the latest when
+metrics are next sent:
+
+| Logged                                     | Means                                            |
+| ------------------------------------------ | ------------------------------------------------ |
+| `Failed to export ... code: 401`           | The headers value is wrong; see above.           |
+| `Failed to export ... code: 404`           | The endpoint is wrong. It ends in `/otlp`; the app adds `/v1/traces` and `/v1/metrics` itself. |
+| nothing, and nothing in Grafana either     | The app is not sending: check the variable name, and that the service was deployed after it was set. |
 
 Each service also has `VILOQ_ENVIRONMENT` (`production` or `development`) from
 `render.yaml`, and every trace and metric carries it, so one Grafana Cloud
