@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry.sdk.metrics.export import Histogram, InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import Histogram, InMemoryMetricReader, Sum
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -391,34 +391,45 @@ class TestAppMetrics:
 
 
 DASHBOARD = REPO_ROOT / "observability" / "dashboards" / "viloq.json"
+ALERTS = REPO_ROOT / "observability" / "alerts" / "viloq.yaml"
 FILTER = 'deployment_environment_name=~"$environment",service_version=~"$version"'
-# A metric and its selector, `viloq_..._total{...}`; a bare `viloq_...` is a label.
-_SELECTED = re.compile(r"\b(viloq_\w+)(\{[^}]*\})")
+# A metric and its selector, `viloq_..._total{...}`; a bare `viloq_...` is a
+# label. The app's own metrics, and the HTTP ones the instrumentation records.
+_SELECTED = re.compile(r"\b((?:viloq|http_server)_\w+)(\{[^}]*\})")
 _SERIES_ENDINGS = ("_total", "_bucket", "_count", "_sum")
+# The unit suffixes Prometheus adds; a `{...}` unit, like `{group}`, adds none.
+_UNIT_SUFFIXES = {"ms": "_milliseconds", "s": "_seconds", "By": "_bytes"}
 
 
 def _prometheus_names(captured: Captured) -> set[str]:
-    """What Prometheus calls the app's metrics: `.` becomes `_`, a counter gets
-    `_total`, and a histogram is its `_bucket`, `_count` and `_sum` series."""
+    """What Prometheus calls the app's metrics: `.` becomes `_`, the unit is
+    spelled out after it, a counter gets `_total`, and a histogram is its
+    `_bucket`, `_count` and `_sum` series."""
     data = captured.metrics.get_metrics_data()
     names = set()
     for batch in data.resource_metrics:
         for scope in batch.scope_metrics:
             for metric in scope.metrics:
                 base = metric.name.replace(".", "_")
+                base += _UNIT_SUFFIXES.get(metric.unit or "", "")
                 if isinstance(metric.data, Histogram):
                     names |= {f"{base}_bucket", f"{base}_count", f"{base}_sum"}
-                else:
+                elif isinstance(metric.data, Sum) and metric.data.is_monotonic:
                     names.add(f"{base}_total")
+                else:
+                    names.add(base)
     return names
+
+
+def _dashboard() -> dict:
+    return json.loads(DASHBOARD.read_text(encoding="utf-8"))
 
 
 class TestDashboard:
     def queries(self) -> list[str]:
-        board = json.loads(DASHBOARD.read_text(encoding="utf-8"))
         return [
             target["expr"]
-            for panel in board["panels"]
+            for panel in _dashboard()["panels"]
             for target in panel.get("targets", [])
         ]
 
@@ -429,7 +440,7 @@ class TestDashboard:
             for _, selector in selectors:
                 assert FILTER in selector, query
             # A metric named with no selector at all would not be filtered.
-            bare = re.findall(r"\bviloq_\w+(?![\w{])", query)
+            bare = re.findall(r"\b(?:viloq|http_server)_\w+(?![\w{])", query)
             assert not [name for name in bare if name.endswith(_SERIES_ENDINGS)], query
 
     def test_it_asks_only_for_metrics_the_app_sends(self, captured: Captured):
@@ -440,3 +451,48 @@ class TestDashboard:
             name for query in self.queries() for name, _ in _SELECTED.findall(query)
         }
         assert asked <= sent
+
+
+class TestAlerts:
+    """`observability/alerts/viloq.yaml`, read without a YAML parser."""
+
+    def rules(self) -> str:
+        return ALERTS.read_text(encoding="utf-8")
+
+    def field(self, name: str) -> str:
+        (value,) = re.findall(rf"^ +{name}: (.+)$", self.rules(), re.MULTILINE)
+        return value.strip('"')
+
+    def test_it_watches_production_only(self):
+        selectors = _SELECTED.findall(self.rules())
+        assert selectors
+        for _, selector in selectors:
+            assert 'service_name="viloq"' in selector
+            assert 'deployment_environment_name="production"' in selector
+
+    def test_it_asks_only_for_metrics_the_app_sends(self, captured: Captured):
+        sign_in(captured.client, "alice@example.com")
+        sent = _prometheus_names(captured)
+        asked = {name for name, _ in _SELECTED.findall(self.rules())}
+        assert asked <= sent
+
+    def test_it_says_what_is_failing_where_and_whose_it_is(self):
+        assert self.field("service") == "{{ $labels.service_name }}"
+        assert self.field("environment") == "{{ $labels.deployment_environment_name }}"
+        assert self.field("version") == "{{ $labels.service_version }}"
+        assert self.field("owner")
+        assert self.field("severity") == "critical"
+
+    def test_it_links_to_the_panel_that_charts_it(self):
+        board = _dashboard()
+        assert self.field("__dashboardUid__") == board["uid"]
+        (panel,) = [
+            panel
+            for panel in board["panels"]
+            if str(panel["id"]) == self.field("__panelId__")
+        ]
+        assert "http_server_duration_milliseconds_count" in panel["targets"][0]["expr"]
+        url = re.search(r"dashboard_url: >-\s+(.+)$", self.rules(), re.MULTILINE)
+        assert url is not None
+        # Grafana's external URL ends in `/`.
+        assert url[1].startswith("{{ externalURL }}d/" + board["uid"] + "/")
