@@ -1,6 +1,14 @@
-# Deploys a commit to one Render service and waits until it is live and
-# healthy. Called by `ci-cd.yml` (to development) and `promote.yml` (to
+# Deploys one image from GitHub's container registry to one Render service and
+# waits until it is live and healthy. Render pulls the image; it builds
+# nothing. Called by `ci-cd.yml` (to development) and `promote.yml` (to
 # production); never runs alone.
+#
+# Once the image is live, it moves the environment's own tag (`development` or
+# `production`) onto it. That tag is what `render.yaml` names, so a Blueprint
+# sync, which redeploys whatever image the Blueprint names, keeps the image
+# the environment already runs instead of rolling it back.
+#
+# The caller must grant `packages: write`, to move that tag.
 #
 # Needs, in the GitHub environment it deploys to (Settings > Environments):
 #   secret   RENDER_DEPLOY_HOOK_URL  that service's Settings > Deploy Hook
@@ -25,14 +33,19 @@ on:
         description: The name of the Render service, in `render.yaml`, that it deploys.
         required: true
         type: string
-      commit:
-        description: The commit to deploy, which must be on the service's branch. Defaults to the one that triggered the run.
-        required: false
+      tag:
+        description: The image to deploy, by its YYYYMMDD-HHMMSS-shortsha tag in ghcr.io/ckcabang/viloq.
+        required: true
         type: string
-        default: ""
 
 permissions:
   contents: read
+  packages: write
+
+env:
+  # Also in `ci-cd.yml` and `render.yaml`; Render rejects a deploy from any
+  # other repository than the one the service names.
+  IMAGE: ghcr.io/ckcabang/viloq
 
 jobs:
   deploy:
@@ -46,8 +59,20 @@ jobs:
       group: deploy-${{ inputs.environment }}
       cancel-in-progress: false
     env:
-      COMMIT: ${{ inputs.commit || github.sha }}
+      TAG: ${{ inputs.tag }}
     steps:
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check ${{ inputs.tag }} is in the registry
+        run: |
+          [[ "$TAG" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{7}$ ]] || { echo "::error::$TAG is not a YYYYMMDD-HHMMSS-shortsha tag"; exit 1; }
+          docker buildx imagetools inspect "$IMAGE:$TAG" || { echo "::error::$IMAGE:$TAG is not in the registry"; exit 1; }
+
       - name: Check the deploy hook is ${{ inputs.service }}'s
         id: service
         env:
@@ -74,13 +99,15 @@ jobs:
           echo "id=$service_id" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger the deploy of ${{ env.COMMIT }}
+      - name: Trigger the deploy of ${{ inputs.tag }}
         id: trigger
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
         run: |
-          # The hook URL already carries `?key=...`.
-          response=$(curl -fsS -X POST "$HOOK&ref=$COMMIT")
+          # The hook URL already carries `?key=...`; `imgURL` picks the image,
+          # which must be in the repository the service is set to pull from.
+          img=$(jq -rn --arg url "$IMAGE:$TAG" '$url | @uri')
+          response=$(curl -sS --fail-with-body -X POST "$HOOK&imgURL=$img")
           echo "$response"
           # A 200 names the new deploy. A 202 (one is already running, ours
           # queues behind it) may not, and the next step looks it up instead.
@@ -103,8 +130,8 @@ jobs:
           deadline=$((SECONDS + 20 * 60))
           while (( SECONDS < deadline )); do
             if [[ -z "$DEPLOY_ID" ]]; then
-              DEPLOY_ID=$(api "deploys?limit=20" | jq -r --arg sha "$COMMIT" \
-                '[.[].deploy | select(.commit.id == $sha)][0].id // empty' || true)
+              DEPLOY_ID=$(api "deploys?limit=20" | jq -r --arg tag ":$TAG" \
+                '[.[].deploy | select((.image.ref // "") | contains($tag))][0].id // empty' || true)
             fi
             if [[ -n "$DEPLOY_ID" ]]; then
               status=$(api "deploys/$DEPLOY_ID" | jq -r '.status' || echo unknown)
@@ -118,14 +145,14 @@ jobs:
                   exit 1 ;;
               esac
             else
-              echo "$(date -u +%T) waiting for Render to list a deploy of $COMMIT"
+              echo "$(date -u +%T) waiting for Render to list a deploy of $TAG"
             fi
             sleep 15
           done
-          echo "::error::Render deploy ${DEPLOY_ID:-of $COMMIT} was not live within 20 minutes"
+          echo "::error::Render deploy ${DEPLOY_ID:-of $TAG} was not live within 20 minutes"
           exit 1
 
-      - name: Check the live service is this commit and healthy
+      - name: Check the live service is this image and healthy
         env:
           SERVICE_URL: ${{ steps.service.outputs.url }}
         run: |
@@ -135,11 +162,24 @@ jobs:
             body=$(curl -sS --max-time 10 "$SERVICE_URL/healthz" || true)
             echo "$(date -u +%T) $body"
             if [[ "$(jq -r '.status' <<<"$body" 2>/dev/null)" == ok &&
-                  "$(jq -r '.commit' <<<"$body" 2>/dev/null)" == "$COMMIT" ]]; then
-              echo "Deployed $COMMIT and healthy."
+                  "$(jq -r '.image' <<<"$body" 2>/dev/null)" == "$TAG" ]]; then
+              echo "Deployed $IMAGE:$TAG and healthy."
               exit 0
             fi
             sleep 10
           done
-          echo "::error::$SERVICE_URL/healthz did not report $COMMIT as healthy"
+          echo "::error::$SERVICE_URL/healthz did not report $TAG as healthy"
           exit 1
+
+      - name: Tag ${{ inputs.tag }} as ${{ inputs.environment }}
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          SERVICE_URL: ${{ steps.service.outputs.url }}
+        run: |
+          # Only once it is live: until then, the tag still names what runs.
+          docker buildx imagetools create --tag "$IMAGE:$ENVIRONMENT" "$IMAGE:$TAG"
+          {
+            echo "### Deployed to $ENVIRONMENT"
+            echo
+            echo "\`$IMAGE:$TAG\`, now also \`$IMAGE:$ENVIRONMENT\`, at $SERVICE_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,10 +1,13 @@
-# Tests every push and pull request; deploys `main` to Render's development
-# environment once they pass (see `render.yaml`). Production is deployed only
-# by promoting what development runs, by hand, with `promote.yml`.
+# Tests every push and pull request, and builds the app's image once. On
+# `main` it pushes that image to GitHub's container registry and, once every
+# test passes, deploys it to Render's development environment (see
+# `render.yaml`). Production only ever gets an image development already runs,
+# promoted by hand with `promote.yml`; Render never builds anything itself.
 #
-#   backend ─┐
-#            ├─ stack (integration + browser e2e against compose) ─ deploy-development (main only)
-#   frontend ┘
+#   backend ──┐
+#   frontend ─┼─ stack (integration + browser e2e, on that image) ─ deploy-development (main only)
+#   build ────┘
+#      └─ ghcr.io/ckcabang/viloq:YYYYMMDD-HHMMSS-shortsha (main only)
 #
 # Deploys run `deploy.yml`, here and in `promote.yml`. Each needs, under
 # Settings > Environments, that environment's own Render deploy hook:
@@ -14,8 +17,8 @@
 #   secret RENDER_API_KEY  Account Settings > API Keys, to follow the deploys
 # A repository-level RENDER_DEPLOY_HOOK_URL is the fallback for an environment
 # without one; `deploy.yml` refuses it unless it names that environment's
-# service. `render.yaml` turns Render's own auto-deploy off, so these two
-# workflows are the only way a commit reaches either one.
+# service. Render's services pull a prebuilt image and never redeploy on their
+# own, so these two workflows are the only way an image reaches either one.
 #
 # Runners are pinned to ubuntu-24.04 rather than ubuntu-latest, which moves to
 # Ubuntu 26 from 2026-10-19: `playwright install --with-deps` only supports the
@@ -35,6 +38,10 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  # Also in `render.yaml` and `deploy.yml`.
+  IMAGE: ghcr.io/ckcabang/viloq
 
 jobs:
   backend:
@@ -80,23 +87,100 @@ jobs:
       - name: Unit tests
         run: node --test 'tests/**/*.test.js'
 
+  build:
+    name: Build the image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      image: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag it YYYYMMDD-HHMMSS-shortsha
+        id: tag
+        run: |
+          # When it was built, in UTC, and from what; unique per build, and
+          # tags sort in build order.
+          tag="$(date -u +%Y%m%d-%H%M%S)-${GITHUB_SHA::7}"
+          echo "$IMAGE:$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+          build-args: |
+            VILOQ_COMMIT=${{ github.sha }}
+            VILOQ_IMAGE_TAG=${{ steps.tag.outputs.tag }}
+          # Links the package to this repository on GitHub.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # Hands the stack job these exact bytes, on pull requests too, where
+      # nothing is pushed.
+      - name: Save
+        run: docker save "$IMAGE:${{ steps.tag.outputs.tag }}" | gzip > "$RUNNER_TEMP/image.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: ${{ runner.temp }}/image.tar.gz
+          retention-days: 7
+          compression-level: 0
+      - name: Log in to the registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          docker push "$IMAGE:$TAG"
+          {
+            echo "### Image"
+            echo
+            echo "\`$IMAGE:$TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   stack:
     name: Integration and e2e tests
-    needs: [backend, frontend]
+    needs: [backend, frontend, build]
     runs-on: ubuntu-24.04
     env:
       VILOQ_E2E_BASE_URL: http://localhost:8000
+      # Read by `compose.yaml`: run the image the build job made.
+      VILOQ_APP_IMAGE: ${{ needs.build.outputs.image }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: image
+          path: ${{ runner.temp }}
+      - name: Load the image
+        run: gunzip -c "$RUNNER_TEMP/image.tar.gz" | docker load
       - name: Start the stack
-        run: docker compose up -d --build --wait
+        run: docker compose up -d --no-build --wait
       - run: uv sync --locked
       - run: uv run playwright install --with-deps chromium
-      - name: Stack is healthy
-        run: curl -fsS "$VILOQ_E2E_BASE_URL/healthz"
+      - name: Stack is healthy, on that image
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          body=$(curl -fsS "$VILOQ_E2E_BASE_URL/healthz")
+          echo "$body"
+          jq -e --arg tag "$TAG" '.status == "ok" and .image == $tag' <<<"$body" > /dev/null
       - name: Integration tests
         run: uv run pytest tests/integration
       - name: End-to-end tests
@@ -116,10 +200,15 @@ jobs:
 
   deploy-development:
     name: Deploy to development
-    needs: stack
+    needs: [build, stack]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # `deploy.yml` moves the `development` tag onto the image it deployed.
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/deploy.yml
     with:
       environment: development
       service: viloq-dev
+      tag: ${{ needs.build.outputs.tag }}
     secrets: inherit

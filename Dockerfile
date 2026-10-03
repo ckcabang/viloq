@@ -40,6 +40,13 @@ COPY --from=frontend /dist ./frontend/
 
 RUN useradd --system viloq
 
+# Which build this is, for `/healthz`. CI passes both; a local build leaves
+# them empty. Last, since they change on every build and bust what follows.
+ARG VILOQ_COMMIT=""
+ARG VILOQ_IMAGE_TAG=""
+ENV VILOQ_COMMIT=$VILOQ_COMMIT \
+    VILOQ_IMAGE_TAG=$VILOQ_IMAGE_TAG
+
 # The database is Postgres, named by VILOQ_DATABASE_URL at run time (see
 # compose.yaml); the image holds no data of its own.
 ENV PATH="/app/.venv/bin:$PATH" \

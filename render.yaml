@@ -1,5 +1,6 @@
 # Render Blueprint: two independent copies of the app's image plus a managed
-# Postgres, the same pair `compose.yaml` runs locally.
+# Postgres, the same pair `compose.yaml` runs locally. Render builds nothing:
+# both services pull the image CI built, from ghcr.io/ckcabang/viloq.
 #
 #   production   viloq      + viloq-db      https://viloq.onrender.com
 #   development  viloq-dev  + viloq-dev-db  https://viloq-dev.onrender.com
@@ -12,24 +13,28 @@
 #
 # Create it from the Render dashboard with New > Blueprint, pointing at this
 # repo. Pushes to `main` deploy to development through
-# `.github/workflows/ci-cd.yml`, once its tests pass; production gets what
+# `.github/workflows/ci-cd.yml`, once its tests pass; production gets the image
 # development runs only when someone runs `.github/workflows/promote.yml`.
+#
+# Each service names its environment's tag, `:production` or `:development`,
+# which `.github/workflows/deploy.yml` moves onto every image it deploys there.
+# A Blueprint sync deploys the image the Blueprint names, so naming a fixed
+# image here would roll the service back to it on the next sync; the moving
+# tag keeps it on what it already runs. The tags must exist before a sync, and
+# the package must be public, or Render needs a registry credential (`creds`).
 # Spec: https://render.com/docs/blueprint-spec
 
 services:
   # --- Production ---------------------------------------------------------------
   - type: web
     name: viloq
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/ckcabang/viloq:production
     plan: 0.5c-512mb
     region: oregon
-    branch: main
-    # Off: CI calls the deploy hook after the tests pass, rather than Render
-    # deploying every commit on its own.
-    autoDeployTrigger: "off"
     # 200 once uvicorn is up, startup (which creates the tables) got through,
-    # and Postgres answers. It also names the commit, which CI waits for.
+    # and Postgres answers. It also names the image, which CI waits for.
     healthCheckPath: /healthz
     envVars:
       # The image's uvicorn listens on 8000; Render otherwise expects 10000.
@@ -51,12 +56,11 @@ services:
   # The same as production, on its own database.
   - type: web
     name: viloq-dev
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/ckcabang/viloq:development
     plan: 0.5c-512mb
     region: oregon
-    branch: main
-    autoDeployTrigger: "off"
     healthCheckPath: /healthz
     envVars:
       - key: PORT

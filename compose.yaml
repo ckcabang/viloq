@@ -22,6 +22,10 @@ services:
       retries: 30
 
   app:
+    # `--build` builds it from here. CI instead names the image it built in
+    # VILOQ_APP_IMAGE and runs that with `--no-build`, so the suites test the
+    # very image that is deployed.
+    image: ${VILOQ_APP_IMAGE:-viloq}
     build: .
     # `depends_on` only orders `up`: a `docker compose restart`, or Docker
     # itself restarting, can start the app while Postgres is still down. It
