@@ -1,0 +1,81 @@
+# The app's alert rules, in Prometheus's rule-file format, which Grafana
+# imports as Grafana-managed rules (Alerting > Alert rules > More > Import to
+# Grafana-managed rules). The same file goes into the local stack and into
+# Grafana Cloud; see observability/README.md.
+#
+# One rule, for the one thing worth waking up for: production failing the
+# people using it.
+
+groups:
+  - name: viloq
+    interval: 1m
+    rules:
+      # Requests the app answered with a 5xx: an unhandled exception (500), the
+      # database down or out of connections (500), whatever the request was.
+      # Unlike a 4xx, nothing the person did caused it and nothing they can do
+      # gets past it: the expense is not saved, the group does not load.
+      #
+      # Fires when more than 5% of production requests fail over 5 minutes,
+      # and keeps doing so for 5 more. One in twenty actions failing is an app
+      # people cannot rely on; a single bad request, or the minute or two a
+      # deploy or restart takes, stays under it. The at-least-3 guard is for
+      # quiet hours: with ten requests in 5 minutes, one failure would be 10%.
+      #
+      # Grouped by version, so the alert names the image to roll back when a
+      # deploy is the cause; during a deploy both versions are judged alone.
+      #
+      # The counts are the FastAPI instrumentation's, under the older HTTP
+      # semantic conventions (`http_status_code`). An upgrade that moves it to
+      # the newer ones (`http_server_request_duration_seconds`,
+      # `http_response_status_code`) leaves this matching nothing: change
+      # both together.
+      - alert: ViloqServerErrors
+        expr: |
+          (
+              sum by (service_name, deployment_environment_name, service_version) (
+                increase(http_server_duration_milliseconds_count{service_name="viloq", deployment_environment_name="production", http_status_code=~"5.."}[5m])
+              )
+            /
+              sum by (service_name, deployment_environment_name, service_version) (
+                increase(http_server_duration_milliseconds_count{service_name="viloq", deployment_environment_name="production"}[5m])
+              )
+          ) > 0.05
+          and
+            sum by (service_name, deployment_environment_name, service_version) (
+              increase(http_server_duration_milliseconds_count{service_name="viloq", deployment_environment_name="production", http_status_code=~"5.."}[5m])
+            ) >= 3
+        for: 5m
+        labels:
+          severity: critical
+          owner: ckcabang
+          service: "{{ $labels.service_name }}"
+          environment: "{{ $labels.deployment_environment_name }}"
+          version: "{{ $labels.service_version }}"
+        annotations:
+          summary: >-
+            {{ $labels.service_name }} {{ $labels.deployment_environment_name }}:
+            {{ humanizePercentage $value }} of requests failing with a 5xx
+            on {{ $labels.service_version }}
+          description: >-
+            For 5 minutes and more, over 5% of requests to
+            {{ $labels.service_name }} in {{ $labels.deployment_environment_name }}
+            have failed with a server error, so people cannot save or see their
+            expenses. Version {{ $labels.service_version }} is serving them.
+            Owner: ckcabang.
+          runbook: >-
+            1. Open the dashboard: Errors by code and Errors by route show what
+            fails and where; Versions running shows whether it began with a
+            deploy.
+            2. Tempo, {resource.deployment.environment.name="production" && status=error},
+            gives the exception and stack trace.
+            3. If it began with {{ $labels.service_version }}, roll back in the
+            Render dashboard (viloq > Events > Rollback), then fix forward.
+            4. If every route fails, check viloq-db in Render and the service's
+            Logs: the app cannot reach Postgres.
+          dashboard_url: >-
+            {{ externalURL }}d/viloq-app/viloq?var-environment={{ $labels.deployment_environment_name }}&var-version={{ $labels.service_version }}&from=now-3h&to=now
+          # Grafana links the alert to the dashboard panel that charts it,
+          # Requests failing with a server error, draws its state changes
+          # there, and puts both links in notifications.
+          __dashboardUid__: viloq-app
+          __panelId__: "21"
