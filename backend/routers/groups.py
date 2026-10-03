@@ -10,6 +10,7 @@ from backend.deps import (
     DbDep,
     GroupIdDep,
     IfMatchDep,
+    MetricsDep,
     UserDep,
     check_version,
     require_creator,
@@ -77,7 +78,11 @@ def list_groups(db: DbDep, user: UserDep) -> list[GroupSummary]:
     responses={400: {"model": Error}},
 )
 def create_group(
-    body: CreateGroupRequest, db: DbDep, user: UserDep, response: Response
+    body: CreateGroupRequest,
+    db: DbDep,
+    user: UserDep,
+    response: Response,
+    metrics: MetricsDep,
 ) -> Group:
     group_name = (body.name or "").strip()
     member_name = (body.displayName or "").strip()
@@ -113,6 +118,7 @@ def create_group(
             )
         )
 
+    metrics.group_created()
     set_etag(response, group.version)
     return views.group(group)
 
@@ -125,13 +131,14 @@ def create_group(
     responses={403: {"model": Error}, 404: {"model": Error}},
 )
 def get_group_snapshot(
-    groupId: GroupIdDep, db: DbDep, user: UserDep
+    groupId: GroupIdDep, db: DbDep, user: UserDep, metrics: MetricsDep
 ) -> GroupSnapshot:
     group, me = require_group_membership(db, user, groupId)
 
     members = db.members_of(group.id)
     expenses = db.expenses_of(group.id)
     payments = db.payments_of(group.id)
+    metrics.group_loaded(len(expenses))
 
     return GroupSnapshot(
         group=views.group_view(

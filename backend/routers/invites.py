@@ -10,6 +10,7 @@ from backend.db import now, random_id
 from backend.deps import (
     DbDep,
     GroupIdDep,
+    MetricsDep,
     UserDep,
     require_creator,
     require_group_membership,
@@ -48,7 +49,11 @@ def get_invite_info(code: InviteCodeDep, db: DbDep) -> InviteInfo:
     responses={400: {"model": Error}, 403: {"model": Error}, 404: {"model": Error}},
 )
 def join_group(
-    code: InviteCodeDep, body: JoinRequest, db: DbDep, user: UserDep
+    code: InviteCodeDep,
+    body: JoinRequest,
+    db: DbDep,
+    user: UserDep,
+    metrics: MetricsDep,
 ) -> JoinResult:
     name = (body.displayName or "").strip()
     if not name:
@@ -64,7 +69,8 @@ def join_group(
             )
 
         member = db.membership(user.id, group.id)
-        if member is None:
+        joined = member is None
+        if joined:
             stamp = now()
             member = db.add_member(
                 MemberRecord(
@@ -77,6 +83,9 @@ def join_group(
                 )
             )
 
+    # Following an invite to a group you are already in changes nothing.
+    if joined:
+        metrics.member_joined()
     return JoinResult(group=views.group(group), member=views.member(member))
 
 

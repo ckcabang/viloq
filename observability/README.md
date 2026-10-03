@@ -27,8 +27,9 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 VILOQ_ENVIRONMENT=local \
   uv run uvicorn backend.main:app --reload
 ```
 
-Use the app for a bit, then open http://localhost:3000 (no sign-in) and go to
-Explore:
+Use the app for a bit, then open http://localhost:3000 (no sign-in). The
+**viloq** dashboard (in the `viloq` folder, see [The dashboard](#the-dashboard))
+shows what people do with the app; Explore has the rest:
 
 - **Traces** (Tempo): search `{resource.service.name="viloq"}`. Each request
   is a trace, with its queries inside it; a 500 is marked as an error and
@@ -37,6 +38,77 @@ Explore:
   `db_client_connections_usage`. They are sent once a minute, so the first
   ones take up to a minute to appear.
 - **Logs** (Loki): empty for now; the app does not send logs yet.
+
+## What the app counts
+
+Beside the HTTP and connection-pool metrics, the app counts what people do
+with it (`backend/metrics.py`). Each is labelled with the environment and
+image tag like every other metric (see below), and otherwise only with a few
+fixed values, never an id, an email or an amount.
+
+| Metric (as Prometheus names it)        | Labels                                  | Answers                                          |
+| -------------------------------------- | --------------------------------------- | ------------------------------------------------ |
+| `viloq_magic_links_requested_total`    |                                         | How many sign-in links are asked for             |
+| `viloq_sign_ins_total`                 | `viloq_sign_in_result`                  | New and returning sign-ins, and why links fail: `unknown_link`, `used_link`, `expired_link` |
+| `viloq_groups_created_total`           |                                         | Is anyone starting groups                        |
+| `viloq_members_joined_total`           |                                         | Do invites get used                              |
+| `viloq_expense_changes_total`          | `viloq_operation`, `viloq_split_type`   | Expense activity, and which splits people use    |
+| `viloq_payment_changes_total`          | `viloq_operation`                       | Are debts being paid back                        |
+| `viloq_settlements_suggested_total`    | `viloq_settlement_strategy`             | Which settlement strategy people look at         |
+| `viloq_group_expenses` (histogram)     |                                         | How many expenses a dashboard loads, unpaginated |
+| `viloq_api_errors_total`               | `error_type`, `http_route`              | Errors by contract code, which the status alone runs together (409: `version_conflict` or `currency_locked`) |
+
+Counts are taken once a change is saved, so a refused one is not counted.
+
+Every counter series starts at zero when the process starts, errors for every
+code on every route included. `rate` and `increase` count nothing for a
+series' first sample, and each deploy starts new series (they carry the new
+version), so a series that first appeared at 1 would lose the first sign-up,
+group or error after every deploy. The histogram cannot start at zero without
+a made-up load, so the expenses-per-load panel fills in from the second load
+after a deploy.
+
+Some queries to start from:
+
+```promql
+# Sign-in links that let nobody in, over the last day, by why
+sum by (viloq_sign_in_result) (increase(viloq_sign_ins_total{viloq_sign_in_result=~".*_link"}[1d]))
+
+# Edits lost to someone else's, per minute, in production
+sum(rate(viloq_api_errors_total{error_type="version_conflict", deployment_environment_name="production"}[5m])) * 60
+
+# The 95th percentile of expenses per dashboard load
+histogram_quantile(0.95, sum by (le) (rate(viloq_group_expenses_bucket[1h])))
+
+# Which split types each deployed version saw
+sum by (service_version, viloq_split_type) (increase(viloq_expense_changes_total{viloq_operation="create"}[1d]))
+```
+
+A rise in `used_link` is the usual mark of a mail scanner opening links
+before the person does, once links are emailed.
+
+## The dashboard
+
+`dashboards/viloq.json` puts these metrics on one dashboard: totals for the
+time range picked (sign-ups, failed sign-in links, groups, expenses, edit
+conflicts), which version each environment ran and when, then sign-in,
+activity and errors over time.
+
+Its **Environment** and **Version** dropdowns filter every panel. Both allow
+several values, and both list only what has sent metrics: the versions for
+the environments picked, newest image tag first. A run with no
+`VILOQ_ENVIRONMENT` or image tag (a local one) only shows under **All**.
+
+- **Locally** it is loaded when the stack starts (`grafana-dashboards.yaml`,
+  mounted by `compose.yaml`). Grafana will not save edits to it: change the
+  JSON, then `docker compose -f observability/compose.yaml restart` to load
+  it. To work on it in the editor instead, use **Save as** for a copy, then
+  **Export → Export as JSON** and paste the result over the file.
+- **In Grafana Cloud**, import it once: **Dashboards → New → Import**, upload
+  `dashboards/viloq.json`, pick a folder and import. It needs no data source
+  mapping: its **Data source** dropdown starts at the stack's default
+  Prometheus, `grafanacloud-<stack>-prom`. Import it again, overwriting, after
+  the JSON changes.
 
 Data is kept in the `lgtm-data` volume across restarts. `down` stops the
 stack; `down -v` also deletes what it collected:

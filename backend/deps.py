@@ -1,4 +1,4 @@
-"""Shared request dependencies: session auth, membership, and `If-Match`."""
+"""Shared request dependencies: session auth, membership, `If-Match`, metrics."""
 
 from __future__ import annotations
 
@@ -9,9 +9,11 @@ from fastapi import Depends, Header, Path
 
 from backend import errors
 from backend.db import Database, get_db
+from backend.metrics import Metrics, app_metrics
 from backend.models import Group, Member, User
 
 DbDep = Annotated[Database, Depends(get_db)]
+MetricsDep = Annotated[Metrics, Depends(app_metrics)]
 
 _BEARER = re.compile(r"^Bearer\s+(?P<token>\S+)$", re.IGNORECASE)
 # RFC 7232 entity-tag, optionally weak: W/"3" or "3".
