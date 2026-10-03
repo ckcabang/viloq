@@ -1,0 +1,30 @@
+# A local stand-in for Grafana Cloud: Grafana, with Prometheus (metrics), Loki
+# (logs) and Tempo (traces) behind an OpenTelemetry Collector, all in Grafana
+# Labs' one-container `otel-lgtm` image, its data sources already wired up.
+# For development only; the deployed services send to Grafana Cloud.
+#
+#   docker compose -f observability/compose.yaml up -d --wait
+#
+# then run the app with OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 and
+# open http://localhost:3000. See observability/README.md.
+
+services:
+  lgtm:
+    image: grafana/otel-lgtm:0.35.0
+    restart: unless-stopped
+    ports:
+      # Localhost only: Grafana here signs everyone in as an admin.
+      - "127.0.0.1:3000:3000" # Grafana
+      - "127.0.0.1:4318:4318" # OTLP/HTTP, where the app sends
+    volumes:
+      # Keeps traces, metrics and dashboards across restarts; `down -v` wipes them.
+      - lgtm-data:/data
+    healthcheck:
+      # The image writes this once every component has started.
+      test: ["CMD-SHELL", "test -f /tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  lgtm-data:

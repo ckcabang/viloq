@@ -13,6 +13,7 @@ Collaborative expense splitting with flexible splits, live balances, and simple 
 | `_docs/specs.md`| V1 product specification.                                           |
 | `Dockerfile`    | Two-stage image: Node checks the frontend, Python serves it all.    |
 | `compose.yaml`  | The app's image plus Postgres; `db` alone for dev and tests.        |
+| `observability/` | Local Grafana, Prometheus, Loki and Tempo for the app's telemetry; and setting up Grafana Cloud.|
 | `render.yaml`   | Render Blueprint: development and production, each the image plus its own Postgres.|
 | `.github/workflows/ci-cd.yml` | Tests every push and PR and builds the image; on `main`, pushes it and deploys it to development.|
 | `.github/workflows/promote.yml` | Run by hand: promotes the image development runs to production.|
@@ -170,6 +171,7 @@ backend/
   schemas.py    wire schemas, one per schema in openapi.yaml
   views.py      storage record -> wire shape
   issue_link.py operator command: print a sign-in link for an email
+  telemetry.py  OpenTelemetry traces and metrics, sent over OTLP
   domain/       pure logic: split allocation, balances, settlement
   routers/      one module per tag in openapi.yaml
 ```
@@ -202,6 +204,45 @@ its own. Each request gets its own session.
 The tests run against Postgres too, in a separate `viloq_test` database on the
 same server (created on first run, emptied after every test). Point
 `VILOQ_TEST_DATABASE_URL` elsewhere to override; its name must end in `_test`.
+
+### Telemetry
+
+`backend/telemetry.py` instruments the app with OpenTelemetry. Each request
+gets a trace, with a span for every query it runs, and the app records HTTP and
+connection-pool metrics. Every span and metric carries:
+
+| Attribute                     | From                | e.g.                        |
+| ----------------------------- | ------------------- | --------------------------- |
+| `service.name`                | fixed               | `viloq`                     |
+| `deployment.environment.name` | `VILOQ_ENVIRONMENT` | `production`, `development` |
+| `service.version`             | `VILOQ_IMAGE_TAG`   | `20260818-163457-83242da`   |
+| `vcs.ref.head.revision`       | `VILOQ_COMMIT`      | the full commit SHA         |
+
+CI bakes in the image tag and commit, the same values `/healthz` reports.
+`render.yaml` sets the environment on each service, since both run the same
+image. A local build has none of the three, and leaves them out.
+
+Nothing is sent until `OTEL_EXPORTER_OTLP_ENDPOINT` names an OTLP/HTTP
+endpoint, with any API key in `OTEL_EXPORTER_OTLP_HEADERS`. Locally that is the
+Grafana stack in `observability/`; on Render it is Grafana Cloud, set in each
+service's Environment, since the Blueprint leaves both blank (`sync: false`)
+for being secrets. [`observability/README.md`](observability/README.md) covers
+running the one and setting up the other:
+
+```sh
+docker compose -f observability/compose.yaml up -d --wait
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 uv run uvicorn backend.main:app
+# then http://localhost:3000
+```
+
+The SDK's other `OTEL_*` variables work as
+documented, e.g. `OTEL_SDK_DISABLED=true`. `OTEL_SERVICE_NAME` and
+`OTEL_RESOURCE_ATTRIBUTES` override the attributes above.
+
+`/healthz` is not traced, and neither are queries that run outside a request
+(its `SELECT 1`, and the table check at startup), since Render's health checks
+would otherwise bury the real traffic. Span attributes include request paths,
+so an invite code in `/invites/{code}/...` reaches the telemetry backend too.
 
 ### Conventions the contract fixes
 

@@ -72,6 +72,15 @@ def deployed_image() -> str | None:
     return os.environ.get("VILOQ_IMAGE_TAG") or None
 
 
+def deployment_environment() -> str | None:
+    """Which environment this process serves, `production` or `development`.
+
+    Set per service in `render.yaml`, not baked in like the two above: one
+    image runs in both. Unset elsewhere.
+    """
+    return os.environ.get("VILOQ_ENVIRONMENT", "").strip() or None
+
+
 def cors_origins() -> list[str]:
     raw = os.environ.get("VILOQ_CORS_ORIGINS", DEFAULT_CORS_ORIGINS)
     return [origin.strip() for origin in raw.split(",") if origin.strip()]

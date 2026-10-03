@@ -1,0 +1,79 @@
+# Observability
+
+Where the app's traces and metrics go, and how to look at them. The app sends
+them over OpenTelemetry (see `backend/telemetry.py`) to whatever
+`OTEL_EXPORTER_OTLP_ENDPOINT` names, and sends nothing while it is unset.
+
+| Where the app runs           | Sends to                          | Look at it in             |
+| ---------------------------- | --------------------------------- | ------------------------- |
+| Your machine                 | this directory's stack            | http://localhost:3000     |
+| Render, `viloq` and `viloq-dev` | Grafana Cloud, on its free tier | your `*.grafana.net` stack |
+
+Both are free. The app is the same in both; only the endpoint, and in the
+cloud the API key, differ.
+
+## On your machine
+
+`compose.yaml` here runs Grafana Labs' `grafana/otel-lgtm` image: one container
+with an OpenTelemetry Collector in front of Prometheus (metrics), Loki (logs)
+and Tempo (traces), and Grafana with all three already added as data sources.
+It is its own Compose project, apart from the app's `compose.yaml`; the only
+link between them is the endpoint the app is given.
+
+```sh
+docker compose -f observability/compose.yaml up -d --wait    # ~10 seconds
+
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 VILOQ_ENVIRONMENT=local \
+  uv run uvicorn backend.main:app --reload
+```
+
+Use the app for a bit, then open http://localhost:3000 (no sign-in) and go to
+Explore:
+
+- **Traces** (Tempo): search `{resource.service.name="viloq"}`. Each request
+  is a trace, with its queries inside it; a 500 is marked as an error and
+  carries the exception and stack trace. Traces show up within seconds.
+- **Metrics** (Prometheus): e.g. `http_server_duration_milliseconds_count` or
+  `db_client_connections_usage`. They are sent once a minute, so the first
+  ones take up to a minute to appear.
+- **Logs** (Loki): empty for now; the app does not send logs yet.
+
+Data is kept in the `lgtm-data` volume across restarts. `down` stops the
+stack; `down -v` also deletes what it collected:
+
+```sh
+docker compose -f observability/compose.yaml down
+```
+
+Its ports are published on `127.0.0.1` only, since this Grafana signs everyone
+in as an admin. The image is meant for development, not for hosting.
+
+## On Render: Grafana Cloud
+
+The deployed services cannot reach your machine, so they send to Grafana
+Cloud instead: hosted Grafana, Prometheus, Loki and Tempo, the same set as
+above. Its free tier covers 10k active metric series, 50 GB of traces and 50 GB
+of logs a month, kept for 14 days, with no card and no expiry. Development and
+production share it.
+
+1. Sign up at https://grafana.com and create a stack.
+2. In the Grafana Cloud portal, on your stack, open the **OpenTelemetry** tile
+   and generate a token. It shows the two values the app needs:
+   `OTEL_EXPORTER_OTLP_ENDPOINT` (`https://otlp-gateway-prod-<region>.grafana.net/otlp`)
+   and `OTEL_EXPORTER_OTLP_HEADERS` (`Authorization=Basic%20<...>`). The space
+   after `Basic` must be written `%20`.
+3. In the Render dashboard, set both on `viloq` and on `viloq-dev`, under each
+   service's Environment. `render.yaml` declares them with `sync: false`, so
+   they are kept out of the repository and a Blueprint sync leaves them alone.
+
+Each service also has `VILOQ_ENVIRONMENT` (`production` or `development`) from
+`render.yaml`, and every trace and metric carries it, so one Grafana Cloud
+stack keeps the two apart:
+
+- **Traces**: `{resource.deployment.environment.name="production"}`
+- **Metrics**: Grafana Cloud turns it into the `deployment_environment_name`
+  label, e.g.
+  `http_server_duration_milliseconds_count{deployment_environment_name="development"}`.
+  The local stack does the same, so a query you try here works there.
+
+Each is also labelled with `service_version`, the image tag that sent it.

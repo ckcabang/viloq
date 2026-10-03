@@ -23,9 +23,10 @@ from backend.config import (
     deployed_image,
     frontend_dir,
 )
-from backend.db import Database, get_db, init_db
+from backend.db import Database, engine, get_db, init_db
 from backend.errors import ApiError
 from backend.routers import auth, expenses, groups, invites, payments, settlement
+from backend.telemetry import start as start_telemetry
 
 DESCRIPTION = """
 Backend for the viloq expense-splitting app, implemented against the
@@ -43,10 +44,12 @@ from the same origin.
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Create any missing tables before the first request can ask for one.
     init_db()
     yield
+    if app.state.telemetry is not None:
+        app.state.telemetry.shutdown()
 
 
 # Status codes whose default FastAPI/Starlette body must be rewritten into the
@@ -144,6 +147,11 @@ def create_app() -> FastAPI:
     static = frontend_dir()
     if static is not None:
         app.mount("/", StaticFiles(directory=static, html=True), name="frontend")
+
+    # None, and nothing instrumented, unless an OTLP endpoint is configured.
+    app.state.telemetry = start_telemetry()
+    if app.state.telemetry is not None:
+        app.state.telemetry.instrument(app, engine())
 
     return app
 
