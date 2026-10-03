@@ -73,7 +73,7 @@ jobs:
           [[ "$TAG" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{7}$ ]] || { echo "::error::$TAG is not a YYYYMMDD-HHMMSS-shortsha tag"; exit 1; }
           docker buildx imagetools inspect "$IMAGE:$TAG" || { echo "::error::$IMAGE:$TAG is not in the registry"; exit 1; }
 
-      - name: Check the deploy hook is ${{ inputs.service }}'s
+      - name: Check the deploy hook is ${{ inputs.service }}'s, and it can pull an image
         id: service
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
@@ -96,6 +96,24 @@ jobs:
           fi
           [[ "$url" == https://* ]] || { echo "::error::Render reported no public URL for $name"; exit 1; }
           echo "$name ($service_id) at $url"
+
+          # Render refuses the hook below, with little to say why, for a
+          # suspended service or one that does not pull an image; say so here.
+          if [[ "$(jq -r '.suspended' <<<"$service")" == suspended ]]; then
+            echo "::error::$name is suspended; resume it in the Render dashboard, then re-run this job"
+            exit 1
+          fi
+          runtime=$(jq -r '.serviceDetails.runtime // .serviceDetails.env // empty' <<<"$service")
+          if [[ -n "$runtime" && "$runtime" != image ]]; then
+            echo "::error::$name runs as '$runtime', not 'image', so it cannot pull $IMAGE. Sync the Blueprint (render.yaml) in the Render dashboard; Render rejects the sync until $IMAGE:$ENVIRONMENT exists."
+            exit 1
+          fi
+          # Only a warning: Render itself rejects an image from another
+          # repository, and says so below.
+          image_path=$(jq -r '.imagePath // empty' <<<"$service")
+          echo "$name pulls $image_path"
+          [[ "$image_path" == "$IMAGE:"* || "$image_path" == "$IMAGE@"* ]] ||
+            echo "::warning::$name pulls '$image_path', not from $IMAGE; Render may refuse $IMAGE:$TAG"
           echo "id=$service_id" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
@@ -107,8 +125,22 @@ jobs:
           # The hook URL already carries `?key=...`; `imgURL` picks the image,
           # which must be in the repository the service is set to pull from.
           img=$(jq -rn --arg url "$IMAGE:$TAG" '$url | @uri')
-          response=$(curl -sS --fail-with-body -X POST "$HOOK&imgURL=$img")
-          echo "$response"
+          # Keep Render's answer on a refusal too; it is the only reason given.
+          # Never echo the hook itself: its URL carries the key.
+          status=$(curl -sS -o "$RUNNER_TEMP/hook.json" -w '%{http_code}' -X POST "$HOOK&imgURL=$img")
+          response=$(cat "$RUNNER_TEMP/hook.json")
+          echo "$status $response"
+          if [[ "$status" != 200 && "$status" != 202 ]]; then
+            case "$status" in
+              400) why="it rejected $IMAGE:$TAG; the service must be an image service pulling from $IMAGE" ;;
+              401) why="the deploy hook's key is wrong; copy it again from the service's Settings > Deploy Hook" ;;
+              404) why="the service in the deploy hook no longer exists" ;;
+              409) why="the service is suspended; resume it in the Render dashboard" ;;
+              *) why="see its response above" ;;
+            esac
+            echo "::error::Render refused the deploy ($status): $why"
+            exit 1
+          fi
           # A 200 names the new deploy. A 202 (one is already running, ours
           # queues behind it) may not, and the next step looks it up instead.
           echo "deploy_id=$(jq -r '.deploy.id // empty' <<<"$response" 2>/dev/null)" >> "$GITHUB_OUTPUT"
@@ -177,7 +209,9 @@ jobs:
           SERVICE_URL: ${{ steps.service.outputs.url }}
         run: |
           # Only once it is live: until then, the tag still names what runs.
-          docker buildx imagetools create --tag "$IMAGE:$ENVIRONMENT" "$IMAGE:$TAG"
+          # `--prefer-index=false` copies the image as it is, so the tag has
+          # its very digest, rather than a new list wrapping it.
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE:$ENVIRONMENT" "$IMAGE:$TAG"
           {
             echo "### Deployed to $ENVIRONMENT"
             echo
