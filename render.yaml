@@ -51,6 +51,17 @@ services:
       # issued from the service's Shell: `python -m backend.issue_link <email>`.
       - key: VILOQ_EXPOSE_MAGIC_LINK
         value: "0"
+      # Tags its traces and metrics; the image is the same in both services.
+      - key: VILOQ_ENVIRONMENT
+        value: production
+      # Where traces and metrics go: Grafana Cloud's OTLP endpoint and its
+      # `Authorization=Basic%20...` header (see `observability/README.md`).
+      # Secrets, so set in the dashboard, never here; while the endpoint is
+      # unset nothing is sent.
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false
 
   # --- Development --------------------------------------------------------------
   # The same as production, on its own database.
@@ -71,6 +82,12 @@ services:
           property: connectionString
       - key: VILOQ_EXPOSE_MAGIC_LINK
         value: "0"
+      - key: VILOQ_ENVIRONMENT
+        value: development
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false
 
 databases:
   # --- Production ---------------------------------------------------------------
