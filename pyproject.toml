@@ -5,7 +5,7 @@ description = "Collaborative expense splitting with flexible splits, live balanc
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi>=0.115",
+    "fastapi>=0.137.2",
     "opentelemetry-exporter-otlp-proto-http>=1.45.0",
     "opentelemetry-instrumentation-fastapi>=0.66b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.66b0",

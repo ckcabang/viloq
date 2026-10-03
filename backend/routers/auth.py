@@ -9,7 +9,7 @@ from fastapi import APIRouter, Response, status
 from backend import errors, views
 from backend.config import expose_magic_link_token
 from backend.db import MAGIC_LINK_TTL_MINUTES, now
-from backend.deps import DbDep, TokenDep, UserDep
+from backend.deps import DbDep, MetricsDep, TokenDep, UserDep
 from backend.schemas import (
     DisplayNameRequest,
     Error,
@@ -31,12 +31,15 @@ EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     summary="Request a magic sign-in link",
     responses={400: {"model": Error}},
 )
-def request_magic_link(body: MagicLinkRequest, db: DbDep) -> MagicLinkRequestResult:
+def request_magic_link(
+    body: MagicLinkRequest, db: DbDep, metrics: MetricsDep
+) -> MagicLinkRequestResult:
     email = (body.email or "").strip().lower()
     if not EMAIL_PATTERN.match(email):
         raise errors.validation("Enter a valid email address.")
 
     link = db.create_magic_link(email)
+    metrics.magic_link_requested()
     result = MagicLinkRequestResult(
         email=email, expiresInMinutes=MAGIC_LINK_TTL_MINUTES
     )
@@ -54,27 +57,34 @@ def request_magic_link(body: MagicLinkRequest, db: DbDep) -> MagicLinkRequestRes
     summary="Exchange a magic-link token for a session",
     responses={400: {"model": Error}},
 )
-def verify_magic_link(body: VerifyRequest, db: DbDep) -> VerifyResult:
+def verify_magic_link(
+    body: VerifyRequest, db: DbDep, metrics: MetricsDep
+) -> VerifyResult:
     with db.transaction():
         link = db.magic_link(body.token or "")
         if link is None:
+            metrics.sign_in("unknown_link")
             raise errors.ApiError(
                 400, "invalid_token", "This link is not valid. Request a new one."
             )
         if link.used:
+            metrics.sign_in("used_link")
             raise errors.ApiError(
                 400, "invalid_token", "This link was already used. Request a new one."
             )
         if now() > link.expires_at:
+            metrics.sign_in("expired_link")
             raise errors.ApiError(
                 400, "expired_token", "This link expired. Request a new one."
             )
 
         link.used = True
-        user = db.user_by_email(link.email) or db.create_user(link.email)
+        existing = db.user_by_email(link.email)
+        user = existing or db.create_user(link.email)
         user.email_verified = True
         session = db.create_session(user.id)
 
+    metrics.sign_in("signed_up" if existing is None else "signed_in")
     return VerifyResult(
         sessionToken=session.token,
         user=views.user(user),

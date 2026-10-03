@@ -6,7 +6,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from backend.deps import DbDep, GroupIdDep, UserDep, require_group_membership
+from backend.deps import (
+    DbDep,
+    GroupIdDep,
+    MetricsDep,
+    UserDep,
+    require_group_membership,
+)
 from backend.domain.balances import compute_balances
 from backend.domain.settle import minimized_transfers, relationship_preserving_transfers
 from backend.schemas import Error, SettlementResult, Strategy
@@ -28,6 +34,7 @@ def get_settlement(
     groupId: GroupIdDep,
     db: DbDep,
     user: UserDep,
+    metrics: MetricsDep,
     strategy: Annotated[Strategy, Query()] = "minimized",
 ) -> SettlementResult:
     require_group_membership(db, user, groupId)
@@ -41,4 +48,5 @@ def get_settlement(
         if strategy == "relationship"
         else minimized_transfers(compute_balances(members, expenses, payments))
     )
+    metrics.settlement_suggested(strategy)
     return SettlementResult(strategy=strategy, transfers=transfers)

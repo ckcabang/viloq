@@ -1,5 +1,6 @@
 """OpenTelemetry: a trace for every request, with a span for every query it
-makes, plus HTTP and connection-pool metrics, all sent over OTLP/HTTP.
+makes, plus HTTP and connection-pool metrics and the app's own (see
+`backend.metrics`), all sent over OTLP/HTTP.
 
 Every span and metric carries the resource built in `resource`: the service
 name, the environment, and the version (the image tag CI built) that sent it.
@@ -37,6 +38,7 @@ from opentelemetry.trace import SpanKind
 from sqlalchemy import Engine
 
 from backend.config import deployed_commit, deployed_image, deployment_environment
+from backend.metrics import Metrics, api_routes
 
 SERVICE_NAME = "viloq"
 
@@ -95,7 +97,9 @@ class Telemetry:
         )
 
     def instrument(self, app: FastAPI, engine: Engine) -> None:
-        """Trace and measure every request to `app` and every query on `engine`."""
+        """Trace and measure every request to `app` and every query on `engine`,
+        and send what `app` counts itself."""
+        app.state.metrics = Metrics(self.meter_provider, api_routes(app))
         FastAPIInstrumentor.instrument_app(
             app,
             tracer_provider=self.tracer_provider,

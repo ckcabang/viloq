@@ -19,6 +19,9 @@ services:
     volumes:
       # Keeps traces, metrics and dashboards across restarts; `down -v` wipes them.
       - lgtm-data:/data
+      # The app's dashboards, loaded at startup.
+      - ./dashboards:/otel-lgtm/viloq-dashboards:ro
+      - ./grafana-dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/viloq.yaml:ro
     healthcheck:
       # The image writes this once every component has started.
       test: ["CMD-SHELL", "test -f /tmp/ready"]

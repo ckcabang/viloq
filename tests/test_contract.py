@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
+from backend.metrics import ErrorCode
 from tests.conftest import API, Actor, GroupCtx
 
 SPEC = Path(__file__).resolve().parents[1] / "openapi.yaml"
@@ -118,6 +120,14 @@ class TestErrorShape:
         body = response.json()
         assert set(body) == {"code", "message", "current"}
         assert body["code"] == "version_conflict"
+
+    def test_the_metrics_know_every_code_the_contract_lists(self):
+        # Errors are counted from zero for each of these codes, so a code the
+        # contract adds must be added to `ErrorCode` too.
+        spec = SPEC.read_text(encoding="utf-8")
+        listed = re.search(r"Values in use:(.*?)example:", spec, re.DOTALL)
+        assert listed is not None
+        assert re.findall(r"`(\w+)`", listed.group(1)) == list(get_args(ErrorCode))
 
     def test_unknown_route_uses_the_contract_error_shape(self, client):
         response = client.get(f"{API}/nope")

@@ -1,0 +1,13 @@
+# Loads the dashboards in `dashboards/` into the local Grafana at startup,
+# beside the ones the image ships. Mounted by `compose.yaml`; Grafana Cloud
+# gets the same JSON by import instead (see README.md).
+apiVersion: 1
+
+providers:
+  - name: viloq
+    type: file
+    folder: viloq
+    # Edits made in Grafana cannot be saved: change the JSON and restart.
+    allowUiUpdates: false
+    options:
+      path: /otel-lgtm/viloq-dashboards

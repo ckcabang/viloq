@@ -12,6 +12,7 @@ from backend.deps import (
     DbDep,
     GroupIdDep,
     IfMatchDep,
+    MetricsDep,
     UserDep,
     check_version,
     require_group_membership,
@@ -89,6 +90,7 @@ def create_expense(
     db: DbDep,
     user: UserDep,
     response: Response,
+    metrics: MetricsDep,
 ) -> Expense:
     with db.transaction():
         require_group_membership(db, user, groupId)
@@ -106,6 +108,7 @@ def create_expense(
             )
         )
 
+    metrics.expense_changed("create", expense.split_type)
     response.headers["ETag"] = f'"{expense.version}"'
     return views.expense(expense)
 
@@ -130,6 +133,7 @@ def update_expense(
     db: DbDep,
     user: UserDep,
     response: Response,
+    metrics: MetricsDep,
 ) -> Expense:
     with db.transaction():
         require_group_membership(db, user, groupId)
@@ -144,6 +148,7 @@ def update_expense(
         expense.updated_at = now()
         expense.version += 1
 
+    metrics.expense_changed("update", expense.split_type)
     response.headers["ETag"] = f'"{expense.version}"'
     return views.expense(expense)
 
@@ -165,6 +170,7 @@ def delete_expense(
     expected_version: IfMatchDep,
     db: DbDep,
     user: UserDep,
+    metrics: MetricsDep,
 ) -> Response:
     with db.transaction():
         require_group_membership(db, user, groupId)
@@ -175,4 +181,5 @@ def delete_expense(
             views.conflict_payload(views.expense(expense)),
         )
         db.delete_expense(expense.id)
+    metrics.expense_changed("delete", expense.split_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

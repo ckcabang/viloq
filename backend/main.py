@@ -25,6 +25,7 @@ from backend.config import (
 )
 from backend.db import Database, engine, get_db, init_db
 from backend.errors import ApiError
+from backend.metrics import Metrics
 from backend.routers import auth, expenses, groups, invites, payments, settlement
 from backend.telemetry import start as start_telemetry
 
@@ -109,14 +110,16 @@ def create_app() -> FastAPI:
         return JSONResponse(content={"status": "ok", **build})
 
     @app.exception_handler(ApiError)
-    async def handle_api_error(_: Request, exc: ApiError) -> JSONResponse:
+    async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
+        app.state.metrics.error(request, exc.code)
         return JSONResponse(status_code=exc.status_code, content=exc.body())
 
     @app.exception_handler(RequestValidationError)
     async def handle_request_validation(
-        _: Request, exc: RequestValidationError
+        request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         # The contract has no 422: a malformed body is a 400 `validation`.
+        app.state.metrics.error(request, "validation")
         return JSONResponse(
             status_code=400,
             content={"code": "validation", "message": _first_message(exc)},
@@ -124,11 +127,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_exception(
-        _: Request, exc: StarletteHTTPException
+        request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         code, message = _DEFAULT_ERROR_CODES.get(
             exc.status_code, ("internal", "Something went wrong.")
         )
+        app.state.metrics.error(request, code)
         detail = exc.detail if isinstance(exc.detail, str) else None
         return JSONResponse(
             status_code=exc.status_code,
@@ -136,7 +140,8 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(Exception)
-    async def handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
+    async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        app.state.metrics.error(request, "internal")
         return JSONResponse(
             status_code=500,
             content={"code": "internal", "message": "Something went wrong."},
@@ -148,6 +153,8 @@ def create_app() -> FastAPI:
     if static is not None:
         app.mount("/", StaticFiles(directory=static, html=True), name="frontend")
 
+    # Counted into nothing until `instrument` below, or a test, replaces them.
+    app.state.metrics = Metrics()
     # None, and nothing instrumented, unless an OTLP endpoint is configured.
     app.state.telemetry = start_telemetry()
     if app.state.telemetry is not None:

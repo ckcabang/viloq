@@ -12,6 +12,7 @@ from backend.deps import (
     DbDep,
     GroupIdDep,
     IfMatchDep,
+    MetricsDep,
     UserDep,
     check_version,
     require_group_membership,
@@ -58,6 +59,7 @@ def create_payment(
     db: DbDep,
     user: UserDep,
     response: Response,
+    metrics: MetricsDep,
 ) -> Payment:
     with db.transaction():
         # The payer is always the caller's own membership; it is never taken
@@ -81,6 +83,7 @@ def create_payment(
             )
         )
 
+    metrics.payment_changed("create")
     response.headers["ETag"] = f'"{payment.version}"'
     return views.payment(payment, viewer_user_id=user.id)
 
@@ -105,6 +108,7 @@ def update_payment(
     db: DbDep,
     user: UserDep,
     response: Response,
+    metrics: MetricsDep,
 ) -> Payment:
     with db.transaction():
         require_group_membership(db, user, groupId)
@@ -129,6 +133,7 @@ def update_payment(
         payment.updated_at = now()
         payment.version += 1
 
+    metrics.payment_changed("update")
     response.headers["ETag"] = f'"{payment.version}"'
     return views.payment(payment, viewer_user_id=user.id)
 
@@ -150,6 +155,7 @@ def delete_payment(
     expected_version: IfMatchDep,
     db: DbDep,
     user: UserDep,
+    metrics: MetricsDep,
 ) -> Response:
     with db.transaction():
         require_group_membership(db, user, groupId)
@@ -166,4 +172,5 @@ def delete_payment(
             ),
         )
         db.delete_payment(payment.id)
+    metrics.payment_changed("delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

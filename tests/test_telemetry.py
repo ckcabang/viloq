@@ -6,14 +6,17 @@ metrics to in-memory readers instead of the OTLP exporters.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import Histogram, InMemoryMetricReader
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -22,10 +25,11 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from opentelemetry.trace import SpanKind
 from sqlalchemy import Engine
 
+from backend.config import REPO_ROOT
 from backend.db import Database, get_db
 from backend.main import create_app
 from backend.telemetry import Telemetry, export_configured, resource, start
-from tests.conftest import API
+from tests.conftest import API, Actor, GroupCtx, join, make_group, sign_in
 
 IMAGE_TAG = "20260818-163457-83242da"
 COMMIT = "83242da" + "0" * 33
@@ -113,6 +117,27 @@ class Captured:
     def finished(self) -> list[ReadableSpan]:
         return list(self.spans.get_finished_spans())
 
+    def points(self, name: str) -> list:
+        """The data points of metric `name` collected so far."""
+        data = self.metrics.get_metrics_data()
+        return [
+            point
+            for batch in (data.resource_metrics if data else [])
+            for scope in batch.scope_metrics
+            for metric in scope.metrics
+            if metric.name == name
+            for point in metric.data.data_points
+        ]
+
+    def counted(self, name: str) -> dict[tuple, int]:
+        """Counter `name`'s totals so far, keyed by their sorted attributes,
+        leaving out the series still at the zero they start at."""
+        return {
+            tuple(sorted(point.attributes.items())): point.value
+            for point in self.points(name)
+            if point.value
+        }
+
 
 @pytest.fixture
 def captured(deployed, db: Database, test_engine: Engine) -> Iterator[Captured]:
@@ -176,3 +201,242 @@ class TestInstrumentedApp:
         # `SELECT 1` should reach the backend.
         assert captured.client.get("/healthz").status_code == 200
         assert captured.finished() == []
+
+
+def _expense(
+    group: GroupCtx, payer: Actor, split_type: str = "equal", raws=None
+) -> dict:
+    """A 90.00 expense split across all of `group`, `raws` per member if given."""
+    return {
+        "description": "Dinner",
+        "date": "2026-09-02",
+        "amountMinor": 9000,
+        "payerMemberId": group.members[payer.email],
+        "splitType": split_type,
+        "participants": [
+            {"memberId": member, **({"raw": raws[i]} if raws else {})}
+            for i, member in enumerate(group.members.values())
+        ],
+    }
+
+
+class TestAppMetrics:
+    def test_every_counted_series_is_there_from_the_start(self, captured: Captured):
+        # Prometheus's `increase` needs a sample before a count to see it: a
+        # series that first appeared at 1 would lose the first group created
+        # after each deploy.
+        expenses = captured.points("viloq.expense.changes")
+        assert len(expenses) == 3 * 4  # operations by split types
+        assert {point.value for point in expenses} == {0}
+        for name, series in {
+            "viloq.magic_links.requested": 1,
+            "viloq.sign_ins": 5,
+            "viloq.groups.created": 1,
+            "viloq.members.joined": 1,
+            "viloq.payment.changes": 3,
+            "viloq.settlements.suggested": 2,
+        }.items():
+            assert [point.value for point in captured.points(name)] == [0] * series
+
+        # Every code on each of the contract's routes, and the unmatched path.
+        errors = captured.points("viloq.api.errors")
+        assert {point.value for point in errors} == {0}
+        routes = {point.attributes.get("http.route") for point in errors}
+        assert len(routes) == 15 + 1
+        assert f"{API}/groups/{{groupId}}/expenses/{{expenseId}}" in routes
+        assert "/healthz" not in routes
+        assert len(errors) == 15 * 11 + 1
+
+    def test_sign_ins_say_who_got_in_and_why_the_rest_did_not(
+        self, captured: Captured, db: Database
+    ):
+        client = captured.client
+
+        def request_link(email: str) -> str:
+            response = client.post(f"{API}/auth/magic-links", json={"email": email})
+            return response.json()["token"]
+
+        def verify(token: str) -> int:
+            response = client.post(
+                f"{API}/auth/magic-links/verify", json={"token": token}
+            )
+            return response.status_code
+
+        sign_in(client, "alice@example.com")
+        sign_in(client, "alice@example.com")
+        used = request_link("bob@example.com")
+        assert verify(used) == 200
+        assert verify(used) == 400
+        assert verify("no-such-token") == 400
+        expired = request_link("sam@example.com")
+        db.magic_link(expired).expires_at -= timedelta(minutes=16)
+        assert verify(expired) == 400
+
+        assert captured.counted("viloq.sign_ins") == {
+            (("viloq.sign_in.result", "signed_up"),): 2,
+            (("viloq.sign_in.result", "signed_in"),): 1,
+            (("viloq.sign_in.result", "used_link"),): 1,
+            (("viloq.sign_in.result", "unknown_link"),): 1,
+            (("viloq.sign_in.result", "expired_link"),): 1,
+        }
+        assert captured.counted("viloq.magic_links.requested") == {(): 4}
+
+    def test_group_activity_is_counted_once_it_has_happened(
+        self, captured: Captured
+    ):
+        client = captured.client
+        alice = sign_in(client, "alice@example.com")
+        bob = sign_in(client, "bob@example.com")
+        group = make_group(alice)
+        join(group, bob, "Bob")
+        join(group, bob, "Bob")  # already in: nothing changes, nothing counted
+
+        expenses = f"/groups/{group.id}/expenses"
+        created = alice.post(expenses, json=_expense(group, alice)).json()
+        updated = alice.put(
+            f"{expenses}/{created['id']}",
+            json=_expense(group, alice, "percentage", [60, 40]),
+            headers=alice.if_match(created["version"]),
+        ).json()
+        deleted = alice.delete(
+            f"{expenses}/{created['id']}", headers=alice.if_match(updated["version"])
+        )
+        assert deleted.status_code == 204
+        alice.post(expenses, json=_expense(group, alice))
+
+        payment = alice.post(
+            f"/groups/{group.id}/payments",
+            json={
+                "recipientMemberId": group.members[bob.email],
+                "amountMinor": 4500,
+                "date": "2026-09-03",
+            },
+        ).json()
+        alice.delete(
+            f"/groups/{group.id}/payments/{payment['id']}",
+            headers=alice.if_match(payment["version"]),
+        )
+
+        alice.get(f"/groups/{group.id}/settlement")
+        alice.get(f"/groups/{group.id}/settlement?strategy=relationship")
+        alice.get(f"/groups/{group.id}")
+
+        assert captured.counted("viloq.groups.created") == {(): 1}
+        assert captured.counted("viloq.members.joined") == {(): 1}
+        assert captured.counted("viloq.expense.changes") == {
+            (("viloq.operation", "create"), ("viloq.split_type", "equal")): 2,
+            (("viloq.operation", "update"), ("viloq.split_type", "percentage")): 1,
+            (("viloq.operation", "delete"), ("viloq.split_type", "percentage")): 1,
+        }
+        assert captured.counted("viloq.payment.changes") == {
+            (("viloq.operation", "create"),): 1,
+            (("viloq.operation", "delete"),): 1,
+        }
+        assert captured.counted("viloq.settlements.suggested") == {
+            (("viloq.settlement.strategy", "minimized"),): 1,
+            (("viloq.settlement.strategy", "relationship"),): 1,
+        }
+        # `make_group` loads the group while it is empty; the last load sees
+        # the one expense left.
+        (loads,) = captured.points("viloq.group.expenses")
+        assert (loads.count, loads.min, loads.max) == (2, 0, 1)
+
+    def test_a_refused_change_is_not_counted(self, captured: Captured):
+        alice = sign_in(captured.client, "alice@example.com")
+        group = make_group(alice)
+        refused = alice.post(
+            f"/groups/{group.id}/expenses", json=_expense(group, alice, "exact", [1])
+        )
+        assert refused.status_code == 400
+        assert captured.counted("viloq.expense.changes") == {}
+
+    def test_errors_are_counted_by_contract_code_and_route(
+        self, captured: Captured
+    ):
+        client = captured.client
+        alice = sign_in(client, "alice@example.com")
+        group = make_group(alice)
+        rename = {"name": "Porto"}
+        alice.patch(f"/groups/{group.id}", json=rename, headers=alice.if_match(99))
+        alice.patch(f"/groups/{group.id}", json=rename)
+        alice.post("/groups", json={"currency": "XYZ"})
+        client.get(f"{API}/groups")
+        client.get(f"{API}/no-such-thing")
+
+        one_group = f"{API}/groups/{{groupId}}"
+        assert captured.counted("viloq.api.errors") == {
+            (("error.type", "version_conflict"), ("http.route", one_group)): 1,
+            (("error.type", "precondition_required"), ("http.route", one_group)): 1,
+            (("error.type", "validation"), ("http.route", f"{API}/groups")): 1,
+            (("error.type", "unauthorized"), ("http.route", f"{API}/groups")): 1,
+            # No route matched, so none is named.
+            (("error.type", "not_found"),): 1,
+        }
+
+    def test_they_name_the_environment_and_version_that_sent_them(
+        self, captured: Captured
+    ):
+        sign_in(captured.client, "alice@example.com")
+        data = captured.metrics.get_metrics_data()
+        (batch,) = [
+            batch
+            for batch in data.resource_metrics
+            for scope in batch.scope_metrics
+            if scope.scope.name == "viloq"
+        ]
+        attributes = batch.resource.attributes
+        assert attributes["deployment.environment.name"] == "production"
+        assert attributes["service.version"] == IMAGE_TAG
+        assert attributes["vcs.ref.head.revision"] == COMMIT
+
+
+DASHBOARD = REPO_ROOT / "observability" / "dashboards" / "viloq.json"
+FILTER = 'deployment_environment_name=~"$environment",service_version=~"$version"'
+# A metric and its selector, `viloq_..._total{...}`; a bare `viloq_...` is a label.
+_SELECTED = re.compile(r"\b(viloq_\w+)(\{[^}]*\})")
+_SERIES_ENDINGS = ("_total", "_bucket", "_count", "_sum")
+
+
+def _prometheus_names(captured: Captured) -> set[str]:
+    """What Prometheus calls the app's metrics: `.` becomes `_`, a counter gets
+    `_total`, and a histogram is its `_bucket`, `_count` and `_sum` series."""
+    data = captured.metrics.get_metrics_data()
+    names = set()
+    for batch in data.resource_metrics:
+        for scope in batch.scope_metrics:
+            for metric in scope.metrics:
+                base = metric.name.replace(".", "_")
+                if isinstance(metric.data, Histogram):
+                    names |= {f"{base}_bucket", f"{base}_count", f"{base}_sum"}
+                else:
+                    names.add(f"{base}_total")
+    return names
+
+
+class TestDashboard:
+    def queries(self) -> list[str]:
+        board = json.loads(DASHBOARD.read_text(encoding="utf-8"))
+        return [
+            target["expr"]
+            for panel in board["panels"]
+            for target in panel.get("targets", [])
+        ]
+
+    def test_every_query_filters_by_environment_and_version(self):
+        for query in self.queries():
+            selectors = _SELECTED.findall(query)
+            assert selectors, query
+            for _, selector in selectors:
+                assert FILTER in selector, query
+            # A metric named with no selector at all would not be filtered.
+            bare = re.findall(r"\bviloq_\w+(?![\w{])", query)
+            assert not [name for name in bare if name.endswith(_SERIES_ENDINGS)], query
+
+    def test_it_asks_only_for_metrics_the_app_sends(self, captured: Captured):
+        alice = sign_in(captured.client, "alice@example.com")
+        make_group(alice)  # loads the group, so the histogram has a point
+        sent = _prometheus_names(captured)
+        asked = {
+            name for query in self.queries() for name, _ in _SELECTED.findall(query)
+        }
+        assert asked <= sent
