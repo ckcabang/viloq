@@ -1,0 +1,53 @@
+# A drill: an alert that fires as soon as it is imported, to check the whole
+# path an alert takes, without breaking anything. Import it like
+# `viloq.yaml` (see observability/README.md), into a folder of its own, e.g.
+# `viloq-drill`; delete that folder's rule when done.
+#
+# It checks, in order:
+#   1. production is sending metrics: the rule fires on any series production
+#      sends, and stays quiet if there are none;
+#   2. notifications reach someone: it is routed like ViloqServerErrors, by
+#      the same labels, so its email arrives where a real one would;
+#   3. the on-call poller picks it up (`service="viloq"`) and starts an agent,
+#      which should report a drill, not a bug, and commit nothing.
+#
+# Its labels come from production's own series, so the email and the agent
+# see the real environment and deployed version.
+
+groups:
+  - name: viloq-drill
+    interval: 1m
+    rules:
+      - alert: ViloqOnCallDrill
+        # Every counter series exists from the moment the process starts, so
+        # this is 1 for each version production runs, and absent otherwise.
+        expr: |
+          count by (service_name, deployment_environment_name, service_version) (
+            viloq_groups_created_total{service_name="viloq", deployment_environment_name="production"}
+          ) > 0
+        for: 0m
+        labels:
+          severity: critical
+          owner: ckcabang
+          drill: "true"
+          service: "{{ $labels.service_name }}"
+          environment: "{{ $labels.deployment_environment_name }}"
+          version: "{{ $labels.service_version }}"
+        annotations:
+          summary: >-
+            DRILL, no action needed: on-call test for
+            {{ $labels.service_name }} {{ $labels.deployment_environment_name }}
+            on {{ $labels.service_version }}
+          description: >-
+            This alert is a drill from observability/alerts/drill.yaml. It
+            fires whenever production sends metrics, whatever their values:
+            nothing is failing. It checks that alert emails arrive and that
+            the on-call agent is started.
+          runbook: >-
+            1. Confirm this email arrived.
+            2. Confirm the on-call poller logged the alert and its agent wrote
+            a report in on-call-engineer/reports/, calling it a drill and
+            committing nothing.
+            3. Delete the ViloqOnCallDrill rule in Grafana, so it stops firing.
+          dashboard_url: >-
+            {{ externalURL }}d/viloq-app/viloq?var-environment={{ $labels.deployment_environment_name }}&var-version={{ $labels.service_version }}&from=now-3h&to=now

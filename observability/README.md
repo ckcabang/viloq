@@ -172,6 +172,15 @@ address someone reads, or point the default notification policy (or a policy
 matching `severity=critical`) at Slack, Grafana IRM or a phone. The local
 stack sends notifications nowhere.
 
+To check the whole path without breaking anything, import
+`alerts/drill.yaml` the same way, into a folder of its own. Its rule,
+**ViloqOnCallDrill**, fires whenever production sends metrics, routed like
+ViloqServerErrors and marked as a drill. Its email should arrive within a few
+minutes, and the on-call poller (`on-call-engineer/`) should start an agent
+that reports a drill and commits nothing. During a deploy it fires once for
+each version production ran in the last 5 minutes. Delete the rule, or its
+folder, when done.
+
 Rolling back from the Render dashboard (**viloq → Events → Rollback**) brings
 the service back on the previous image, but leaves the `production` tag on
 the failing one, and a Blueprint sync redeploys what that tag names. Fix
