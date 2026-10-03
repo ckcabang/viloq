@@ -36,6 +36,20 @@ after a restart, is not handed over again; `state.json` records what was. One
 that resolves and later fires again is new. If an agent fails, that is
 logged, not retried.
 
+## Stopping it
+
+Ctrl-C stops the poller, but not an agent it started: the agent finishes its
+investigation and writes its report. The poller names any still running,
+with the command that stops one and whatever it started:
+
+```sh
+taskkill //PID <pid> //T //F    # Git Bash on Windows; `taskkill /PID <pid> /T /F` in cmd or PowerShell
+kill <pid>                      # macOS, Linux
+```
+
+The `agent <pid> on on-call/...` line logged when it started has the same
+PID. Then remove its worktree and branch as below.
+
 ## Reviewing what it did
 
 The fix is a commit on the `on-call/...` branch, nowhere else: not on

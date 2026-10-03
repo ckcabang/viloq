@@ -373,8 +373,22 @@ def main(argv: list[str] | None = None) -> int:
             on_call.poll()
             time.sleep(max(0.0, POLL_SECONDS - (time.monotonic() - started)))
     except KeyboardInterrupt:
-        log("stopped; agents still running carry on")
+        on_call.reap()
+        if not on_call.running:
+            log("stopped; no agents running")
+        for job in on_call.running:
+            log(
+                f"stopped; agent {job.process.pid} on {job.branch} carries on. "
+                f"To stop it: {stop_command(job.process.pid)}"
+            )
     return 0
+
+
+def stop_command(pid: int) -> str:
+    """How to stop an agent and whatever it started, e.g. the tests."""
+    if sys.platform == "win32":
+        return f"taskkill /PID {pid} /T /F"
+    return f"kill {pid}"
 
 
 if __name__ == "__main__":
